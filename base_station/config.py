@@ -25,8 +25,8 @@ import numpy as np
 
 '''
 
-PI_IP = "192.168.137.2"
-# PI_IP = socket.gethostbyname("auv.local")
+# PI_IP = "192.168.137.2"
+PI_IP = socket.gethostbyname("auv.local")
 UDP_PORT_DATA = 5005
 UDP_PORT_CMD = 5006
 
@@ -41,6 +41,7 @@ SIN_45 = math.sin(math.radians(45))
 # MAX thrust offered by an individual thruster
 # This change was made due to problems in cancelling moments: from fixing PWM ranges to thrust ranges
 MAX_THRUST = 2.35 
+MAX_THRUST = 0.55 
 
 PWM_NEUTRAL = 1500
 
@@ -51,14 +52,14 @@ CONTROLLER_TYPE = KEYBAORD
 
 # Found mechanical team messing up the connections, as exchanging 2 would invert the direction of thrust
 # Also 4 propellers must in be in one sense and the other 4 in opp sense for cancelling counter rotor torque
-I1 = True
-I2 = False
-I3 = False
+I1 = False
+I2 = True
+I3 = True
 I4 = True 
 I5 = True
 I6 = True
-I7 = True
-I8 = True
+I7 = False
+I8 = False
 
 def invert_pwm(PWM, invert=True):
     if invert == True:
@@ -92,13 +93,15 @@ RECORD_FOOTAGE = False
 
 # Things to Calibrate:
 
+DEPTH_KF = False
+
 PRESSURE_OFFSET = 988 - 1013.25 # mbar # Diff for location and whether
 ROLL_OFFSET = 0
 PITCH_OFFSET = 0
 YAW_OFFSET = 50 # Make this in the direction of the gate
 
 # meter to -1 to 1
-DEPTH_PID = True
+DEPTH_PID = False
 DEPTH_KP = 1.2
 DEPTH_KI = 0.1
 DEPTH_KD = 0.4

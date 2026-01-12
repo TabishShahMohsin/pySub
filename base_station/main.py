@@ -153,7 +153,11 @@ def main():
 
         p_curr = shared_data["pressure"]
         raw_depth = max(0, (p_curr - 1013.25) * 100 / (1025 * 9.81))
-        measured_depth = kf.update(raw_depth, dt)
+
+        if DEPTH_KF:
+            measured_depth = kf.update(raw_depth, dt)
+        else:
+            measured_depth = raw_depth
 
         # Read joystick input
         raw_inputs = controller.get_input_vector()
@@ -219,6 +223,7 @@ def main():
         cam_ids = list(shared_data['last_frames'].keys())
         for cam_id in cam_ids:
             frame = shared_data['last_frames'][cam_id]
+            frame = frame[::-1]
             if frame is not None:
                 cv2.imshow(cam_id, frame)
             
