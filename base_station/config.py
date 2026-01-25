@@ -41,7 +41,6 @@ SIN_45 = math.sin(math.radians(45))
 # MAX thrust offered by an individual thruster
 # This change was made due to problems in cancelling moments: from fixing PWM ranges to thrust ranges
 MAX_THRUST = 2.35 
-MAX_THRUST = 0.55 
 
 PWM_NEUTRAL = 1500
 
@@ -95,7 +94,7 @@ RECORD_FOOTAGE = False
 
 DEPTH_KF = False
 
-PRESSURE_OFFSET = 988 - 1013.25 # mbar # Diff for location and whether
+PRESSURE_OFFSET = 988 - 1013.25 + 1020.91 - 1013.25 # mbar # Diff for location and whether
 ROLL_OFFSET = 0
 PITCH_OFFSET = 0
 YAW_OFFSET = 50 # Make this in the direction of the gate
@@ -103,8 +102,8 @@ YAW_OFFSET = 50 # Make this in the direction of the gate
 # meter to -1 to 1
 DEPTH_PID = False
 DEPTH_KP = 1.2
-DEPTH_KI = 0.1
-DEPTH_KD = 0.4
+DEPTH_KI = 0.0
+DEPTH_KD = 0.0
 
 # Angle in degrees to -1 to 1
 PITCH_PID = False
@@ -120,6 +119,6 @@ ROLL_KD = 0.03
 
 # Angle in degrees to -1 to 1
 YAW_PID = False
-YAW_KP = 0.04
-YAW_KI = 0.0005
-YAW_KD = 0.03
+YAW_KP = 0.0014
+YAW_KI = 0.000
+YAW_KD = 0.0

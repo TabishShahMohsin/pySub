@@ -17,11 +17,8 @@ shared_data = {
     "pwms": [1500] * 8,
     "running": True,
     # Shared from pi to base station
-    "cpu_temp": 0,
     "timestamp": 0, # Heart beat
     "pressure": 0, 
-    "depth": 0,
-    "water_temp": 0,
     "roll": 0,
     "pitch": 0,   
     "yaw": 0,     
@@ -93,15 +90,11 @@ def telemetry_listener():
         try:
             data, addr = sock.recvfrom(1024)
             telemetry = json.loads(data.decode())
-            shared_data['cpu_temp'] = telemetry['cpu_temp']
             shared_data['timestamp'] = telemetry['timestamp']
             shared_data['pressure'] = telemetry['pressure'] - PRESSURE_OFFSET
-            # shared_data['depth'] = telemetry['depth']
-            shared_data['water_temp'] = telemetry['water_temp']
             shared_data['roll'] = telemetry['roll'] - ROLL_OFFSET
             shared_data['pitch'] = telemetry['pitch'] - PITCH_OFFSET
             shared_data['yaw'] = telemetry['yaw'] - YAW_OFFSET
-            # In a real app, you'd save this to a global for the HUD to draw
         except socket.timeout:
             continue
         except Exception as e:
@@ -195,14 +188,13 @@ def main():
         shared_data['pwms'] = thruster_pwms
 
         p = shared_data["pwms"]
-        pi_temp = shared_data["water_temp"]
         f = thruster_forces
         
         dashboard = (
             f"\033[H" +  # Move cursor to top-left (Home)
             f"\n"*20 +
             f"--- ROV_SEA-6.0 DASHBOARD ---\n"
-            f"SYSTEM: Pressure: {p_curr:>7.2f} mb | Pi Temp: {pi_temp:>4.1f}°C\n"
+            f"SYSTEM: Pressure: {p_curr:>7.2f} mb"
             f"{'-'*60}\n"
             f"THRUSTERS (Forces & PWMs):\n"
             f"  Horizontal: T1:{f[0]:>6.2f}({p[0]}) T2:{f[1]:>6.2f}({p[1]}) T3:{f[2]:>6.2f}({p[2]}) T4:{f[3]:>6.2f}({p[3]})\n"
