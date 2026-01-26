@@ -13,14 +13,35 @@ import os
 os.environ['MAVLINK20'] = '1' # Force MAVLink 2.0
 master = mavutil.mavlink_connection('/dev/ttyACM0', baud=115200)
 master.wait_heartbeat()
-# Request data at 20Hz (Stream ID 0, Rate 20, Start/Stop 1)
-master.mav.request_data_stream_send(
-    master.target_system, 
-    master.target_component,
-    mavutil.mavlink.MAV_DATA_STREAM_ALL, 
-    50, # 50 Hz
-    1   # Start sending
-)
+
+THRUSTER_MAP = {
+    1: 2, 2: 1, 3: 4, 4: 3,
+    5: 6, 6: 7, 7: 5, 8: 8
+}
+
+def set_pixhawk_passthrough():
+    """Sets all 8 pins to RCPassThrough mode (51-58)."""
+    print("Configuring Pixhawk Passthrough...")
+    for i in range(1, 9):
+        param_name = f"SERVO{i}_FUNCTION"
+        master.mav.param_set_send(
+            master.target_system, master.target_component,
+            param_name.encode('utf-8'), 50 + i, mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+        )
+    # Request telemetry stream
+    master.mav.request_data_stream_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_DATA_STREAM_ALL, 50, 1
+    )
+
+def arm_vehicle():
+    master.set_mode('MANUAL')
+    time.sleep(0.5)
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0
+    )
+    print("Vehicle ARMED")
 
 # Initializing socket
 PC_IP = socket.gethostbyname('mba.local')
@@ -43,13 +64,16 @@ telemetry = {
     "yaw": 0     
 }
 
-THRUSTER_PINS = {
-    "t1": 1, "t2": 2, "t3": 3, "t4": 4, 
-    "t5": 8, "t6": 7, "t7": 6, "t8": 5  
-}
-
 last_command_time = time.time()
 is_running = True
+
+def get_mapped_pwm_list():
+    """Translates logical 't1-t8' values into the 18-channel MAVLink list."""
+    output = [1500] * 18
+    for t_num, physical_pin in THRUSTER_MAP.items():
+        val = pwms[f"t{t_num}"]
+        output[physical_pin - 1] = val
+    return output[:8] # Returns first 8 for rc_override
 
 def video_stream_loop():
     """Handles camera startup and automatic reconnection."""
@@ -113,112 +137,67 @@ def stop_all_thrusters():
     )
 
 def sensor_sender():
-    sock = None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     while is_running:
         try:
-            if sock is None:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # Get Attitude (Roll, Pitch, Yaw)
             attn = master.recv_match(type='ATTITUDE', blocking=False)
-            if attn is not None:
-                telemetry["roll"] = np.degrees(attn.roll)
-                telemetry["pitch"] = np.degrees(attn.pitch)
-                telemetry["yaw"] = np.degrees(attn.yaw)
-            # Get Pressure (Bar30 on Pixhawk I2C)
+            if attn:
+                telemetry.update({"roll": np.degrees(attn.roll), "pitch": np.degrees(attn.pitch), "yaw": np.degrees(attn.yaw)})
             pres = master.recv_match(type='SCALED_PRESSURE2', blocking=False)
-            if pres is not None:
-                telemetry["pressure"] = pres.press_abs
+            if pres: telemetry["pressure"] = pres.press_abs
+            
             telemetry["timestamp"] = time.time()
-            message = json.dumps(telemetry).encode()
-            sock.sendto(message, (PC_IP, UDP_PORT_DATA))
-        except Exception as e:
-            print(f"Sensor Socket Error: {e}. Retrying...")
-            if sock: sock.close()
-            sock = None # Force recreation
+            sock.sendto(json.dumps(telemetry).encode(), (PC_IP, UDP_PORT_DATA))
+        except: pass
         time.sleep(0.05)
 
-
 def command_receiver():
-    global last_command_time, pwms
-
+    global last_command_time
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((PI_IP, UDP_PORT_CMD))
     sock.settimeout(0.5)
-
+    
     while is_running:
         try:
-            data, addr = sock.recvfrom(1024)
-
-            try:
-                new_cmds = json.loads(data.decode())
-            except json.JSONDecodeError:
-                print("Invalid JSON received")
-                continue
-
-            updated = False
+            data, _ = sock.recvfrom(1024)
+            new_cmds = json.loads(data.decode())
             for key, val in new_cmds.items():
-                if key in pwms and isinstance(val, int):
-                    pwms[key] = max(1150, min(1850, val))
-                    updated = True
+                if key in pwms: pwms[key] = max(1150, min(1850, val))
+            
+            # Map logical commands to physical pins and send
+            final_pwms = get_mapped_pwm_list()
+            master.mav.rc_channels_override_send(
+                master.target_system, master.target_component, *final_pwms
+            )
+            last_command_time = time.time()
+        except: continue
 
-            if updated:
-                master.mav.rc_channels_override_send(
-                    master.target_system, master.target_component,
-                    pwms['t1'], pwms['t2'], pwms['t3'], pwms['t4'],
-                    pwms['t5'], pwms['t6'], pwms['t7'], pwms['t8']
-                )
-                last_command_time = time.time()
-
-        except socket.timeout:
-            continue
-
-        except OSError as e:
-            print(f"Socket error: {e}, rebinding...")
-            sock.close()
-            time.sleep(1)
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((PI_IP, UDP_PORT_CMD))
-            sock.settimeout(0.5)
-
-    sock.close()
-
-
-# --- Main Logic ---
 try:
+    set_pixhawk_passthrough()
+    arm_vehicle()
     stop_all_thrusters()
-    
-    t_sender = threading.Thread(target=sensor_sender, daemon=True)
-    t_receiver = threading.Thread(target=command_receiver, daemon=True)
-    t_video = threading.Thread(target=video_stream_loop, daemon=True)
 
-    t_sender.start()
-    t_receiver.start()
-    t_video.start()
+    threading.Thread(target=sensor_sender, daemon=True).start()
+    threading.Thread(target=command_receiver, daemon=True).start()
+    threading.Thread(target=video_stream_loop, daemon=True).start() # Uncomment when ready
 
     while True:
-
-        # Ensuring NEUTRAL PWM when disconnected then erratic behaviour
         if time.time() - last_command_time > 1.0:
             stop_all_thrusters()
-            print("Warning: Connection lost. Idling thrusters...", end='\r')
+            print("Warning: Connection lost. Idling...", end='\r')
         else:
-
-            # Getting the dashboard
-            status_msg = f"P:{telemetry["pressure"]:>5.2f}m"
             p = pwms
-            dashboard = (
-                f"HORI_PWM:[{p['t1']:>4} {p['t2']:>4} {p['t3']:>4} {p['t4']:>4}] | "
-                f"VERT_PWM:[{p['t5']:>4} {p['t6']:>4} {p['t7']:>4} {p['t8']:>4}] | {status_msg}"
-            )
-            print(f"{dashboard:<150}", end='\r', flush=True)
-        
+            dashboard = f"T1:{p['t1']} T2:{p['t2']} T3:{p['t3']} T4:{p['t4']} | P:{telemetry['pressure']:.2f}"
+            print(f"{dashboard:<100}", end='\r', flush=True)
         time.sleep(0.1)
 
 except KeyboardInterrupt:
-    print("\nShutting down script.")
+    print("\nShutting down.")
 finally:
     is_running = False
     stop_all_thrusters()
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0
+    )
     master.close()
