@@ -1,5 +1,3 @@
-import math
-
 class PID:
     def __init__(self, KP, KI, KD, limit_max, limit_min, is_angle=False):
         self.kp = KP
