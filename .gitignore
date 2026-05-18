@@ -69,3 +69,6 @@ bags/
 *.db3
 
 data/
+
+videos/
+.mov

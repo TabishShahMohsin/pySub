@@ -1,6 +1,8 @@
+![Banner](Banner.png)
+
 # Remotely Operated Underwater Vehicle (ROV) Control System
 
-This project contains the software to control a Remotely Operated Underwater Vehicle (ROV). It consists of two main components: a base station control program and a program that runs on the ROV's Raspberry Pi.
+This project contains the software to control an Underwater Remotely Operated Underwater Vehicle (ROV) with 8 thrusters in V configuration. It consists of two main components: a base station control program and a program that runs on the ROV's Raspberry Pi.
 
 ## System Architecture
 
@@ -41,7 +43,7 @@ This project contains the software to control a Remotely Operated Underwater Veh
 
 ## Configuration
 
-- **Network:** IP addresses for the Pi and base station are set in `pi/main.py` and `base_station/config.py`.
+- **Network:** IP addresses / Hostnames for the Pi and base station are set in `pi/main.py` and `base_station/config.py`.
 - **Controller:** The input device (Keyboard, Xbox, PS) can be selected in `base_station/config.py`.
 - **Tuning:** PID gains, sensor offsets, and thruster inversion/enable flags are located in `base_station/config.py`.
 - **Hardware Pins:** GPIO pin assignments for the thrusters are defined in `pi/main.py`.
