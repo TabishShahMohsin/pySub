@@ -1,8 +1,9 @@
-![Banner](Banner.png)
 
 # Remotely Operated Underwater Vehicle (ROV) Control System
 
 This project contains the software to control an Underwater Remotely Operated Underwater Vehicle (ROV) with 8 thrusters in V configuration. It consists of two main components: a base station control program and a program that runs on the ROV's Raspberry Pi.
+
+![Banner](Banner.png)
 
 ## System Architecture
 
@@ -34,6 +35,7 @@ This project contains the software to control an Underwater Remotely Operated Un
 
 ## How to Run
 
+After installing the dependencies:
 1.  **On the ROV's Raspberry Pi:**
     - Ensure `pigpiod` service is running (`sudo pigpiod`).
     - Run the main Pi script: `python3 pi/main.py`.
