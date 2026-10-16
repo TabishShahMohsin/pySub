@@ -46,7 +46,7 @@ def _build_allocation():
     angles = np.deg2rad(THRUSTER_ANGLES_DEG)
 
     b_lateral = np.zeros((3, 4))
-    for i, ((x, y), angle) in enumerate(zip(POSITIONS[:4], angles)):
+    for i, ((x, y), angle) in enumerate(zip(POSITIONS[:4], angles, strict=True)):
         b_lateral[0, i] = np.cos(angle)  # Fx (surge)
         b_lateral[1, i] = np.sin(angle)  # Fy (sway)
         b_lateral[2, i] = x * np.sin(angle) - y * np.cos(angle)  # Tz (yaw)

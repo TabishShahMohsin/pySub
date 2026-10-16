@@ -72,3 +72,6 @@ data/
 
 videos/
 *.mov
+
+# Pi runtime config (see deploy/rov-pi.service)
+rov.env

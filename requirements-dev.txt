@@ -1,0 +1,12 @@
+# Development / CI: everything needed to lint and run the test suite.
+# Hardware-only packages (pigpio, ms5837, picamera2, pyrealsense2) are not needed.
+numpy
+pygame
+opencv-python-headless
+imagezmq
+pyzmq
+pymavlink
+pytest>=8
+pytest-timeout
+ruff==0.16.8
+pre-commit

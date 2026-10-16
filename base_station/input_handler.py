@@ -62,7 +62,7 @@ class XboxController:
 class PSController:
     """Reads a PS4/PS5 controller (pygame 2 / SDL2 axis layout).
 
-    Untested on hardware: run tests/controller_test.py to confirm the axis and
+    Untested on hardware: run hardware_tests/controller_test.py to confirm the axis and
     button indices for your controller before relying on it.
     """
 

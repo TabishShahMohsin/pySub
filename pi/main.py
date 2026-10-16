@@ -198,18 +198,36 @@ def stop_all_thrusters(pixhawk, thrusters, verbose=True):
         _neutral_locked(pixhawk, thrusters)
 
 
+def watchdog_step(pixhawk, thrusters, now=None):
+    """Go neutral if no command arrived within COMMAND_TIMEOUT_S. Returns True if lost.
+
+    The check and the stop happen under one lock so a command arriving in
+    between can't be overwritten by a stale "lost" decision. While the link is
+    lost, neutral is re-sent on every call so the RC override stays fresh.
+    """
+    if now is None:
+        now = time.monotonic()
+    with thrusters.lock:
+        last = thrusters.last_command_time
+        lost = last is None or now - last > COMMAND_TIMEOUT_S
+        if lost:
+            _neutral_locked(pixhawk, thrusters)
+    return lost
+
+
 # ---------------------------------------------------------------------------
 # Threads
 # ---------------------------------------------------------------------------
-def command_receiver(pixhawk, thrusters):
+def command_receiver(pixhawk, thrusters, port=UDP_PORT_CMD):
+    """Receive PWM commands and forward them to the Pixhawk as RC overrides."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((BIND_IP, UDP_PORT_CMD))
+    sock.bind((BIND_IP, port))
     sock.settimeout(0.5)
 
     while running.is_set():
         try:
             data, _ = sock.recvfrom(1024)
-        except socket.timeout:
+        except TimeoutError:
             continue
         except OSError as e:
             print(f"\n[Cmd] Socket error: {e}")
@@ -237,7 +255,8 @@ def command_receiver(pixhawk, thrusters):
     sock.close()
 
 
-def sensor_sender(pixhawk, telemetry, telemetry_lock):
+def sensor_sender(pixhawk, telemetry, telemetry_lock, host=BASE_HOST, port=UDP_PORT_DATA):
+    """Drain Pixhawk telemetry and send it to the base station at a fixed rate."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     period = 1.0 / TELEMETRY_RATE_HZ
     base_ip = None
@@ -254,14 +273,14 @@ def sensor_sender(pixhawk, telemetry, telemetry_lock):
                     telemetry["pressure"] = float(msg.press_abs)
 
         if base_ip is None:
-            base_ip = resolve_host(BASE_HOST)
+            base_ip = resolve_host(host)
 
         if base_ip is not None:
             with telemetry_lock:
                 telemetry["timestamp"] = time.time()
                 payload = json.dumps(telemetry).encode()
             try:
-                sock.sendto(payload, (base_ip, UDP_PORT_DATA))
+                sock.sendto(payload, (base_ip, port))
             except OSError as e:
                 print(f"\n[Telemetry] Send error: {e}")
                 base_ip = None  # Re-resolve next time
@@ -302,7 +321,7 @@ def open_usb_camera():
     return cam
 
 
-def video_stream_loop():
+def video_stream_loop(host=BASE_HOST, port=VIDEO_PORT):
     """Stream camera frames, reconnecting cameras and the network on failure."""
     while running.is_set():
         pipeline = None
@@ -310,12 +329,12 @@ def video_stream_loop():
         sender = None
 
         try:
-            base_ip = resolve_host(BASE_HOST)
+            base_ip = resolve_host(host)
             if base_ip is None:
-                raise RuntimeError(f"cannot resolve '{BASE_HOST}'")
+                raise RuntimeError(f"cannot resolve '{host}'")
 
             print(f"\n[Video] Connecting to base station at {base_ip}...")
-            sender = imagezmq.ImageSender(connect_to=f"tcp://{base_ip}:{VIDEO_PORT}")
+            sender = imagezmq.ImageSender(connect_to=f"tcp://{base_ip}:{port}")
             # Without a timeout, send_image() blocks forever waiting for a
             # reply if the base station restarts (REQ/REP lock-step).
             sender.zmq_socket.setsockopt(zmq.RCVTIMEO, VIDEO_REPLY_TIMEOUT_MS)
@@ -406,16 +425,7 @@ def main():
         link_lost = True
         print("Waiting for base station commands...")
         while True:
-            now = time.monotonic()
-            # Check and act under one lock so a command arriving in between
-            # can't be overwritten by a stale "lost" decision.
-            with thrusters.lock:
-                last = thrusters.last_command_time
-                lost = last is None or now - last > COMMAND_TIMEOUT_S
-                if lost:
-                    # Keep re-sending neutral so the override stays fresh.
-                    _neutral_locked(pixhawk, thrusters)
-
+            lost = watchdog_step(pixhawk, thrusters)
             if lost:
                 if not link_lost:
                     print("\nWarning: Connection lost. Idling (neutral)...")

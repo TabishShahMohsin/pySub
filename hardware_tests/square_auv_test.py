@@ -70,7 +70,7 @@ def get_pwms(surge, sway, yaw, heave, roll=0, pitch=0):
     t8 = heave + pitch + roll
 
     # Apply the inversion mask before normalisation
-    forces = [f * m for f, m in zip([t1, t2, t3, t4, t5, t6, t7, t8], INVERSION_MASK)]
+    forces = [f * m for f, m in zip([t1, t2, t3, t4, t5, t6, t7, t8], INVERSION_MASK, strict=True)]
 
     max_f = max(abs(f) for f in forces)
     if max_f > 1.0:

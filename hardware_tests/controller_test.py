@@ -1,4 +1,4 @@
-import os
+"""Live view of every axis and button on the first connected game controller."""
 
 import pygame
 
@@ -8,21 +8,21 @@ def main():
     pygame.joystick.init()
 
     if pygame.joystick.get_count() == 0:
-        print("❌ No controller found.")
+        print("No controller found.")
         return
 
     joy = pygame.joystick.Joystick(0)
     joy.init()
 
-    print(f"📡 Debugging: {joy.get_name()}")
+    print(f"Debugging: {joy.get_name()}")
     print("Press Ctrl+C to stop.\n")
 
     try:
         while True:
             pygame.event.pump()
 
-            # Clear terminal screen for a clean live view
-            os.system("cls" if os.name == "nt" else "clear")
+            # Redraw in place (cheaper than spawning `clear` 10 times a second)
+            print("\033[H\033[J", end="")
 
             print(f"--- Controller: {joy.get_name()} ---")
 

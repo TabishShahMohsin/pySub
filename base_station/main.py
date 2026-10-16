@@ -131,7 +131,10 @@ def pressure_to_depth(pressure_mbar):
 
 def build_command(pwms):
     """Apply per-thruster inversion and build the JSON command for the Pi."""
-    return {f"t{i + 1}": invert_pwm(pwm, inv) for i, (pwm, inv) in enumerate(zip(pwms, INVERTED_THRUSTERS))}
+    return {
+        f"t{i + 1}": invert_pwm(pwm, inv)
+        for i, (pwm, inv) in enumerate(zip(pwms, INVERTED_THRUSTERS, strict=True))
+    }
 
 
 def resolve_host(host):
@@ -144,9 +147,13 @@ def resolve_host(host):
 # ---------------------------------------------------------------------------
 # Threads
 # ---------------------------------------------------------------------------
-def video_receiver():
+def video_receiver(port=VIDEO_PORT):
     """Receive camera frames from the Pi and store the latest one per camera."""
-    image_hub = imagezmq.ImageHub(open_port=f"tcp://*:{VIDEO_PORT}")
+    try:
+        image_hub = imagezmq.ImageHub(open_port=f"tcp://*:{port}")
+    except zmq.ZMQError as e:
+        print(f"Video receiver disabled: cannot bind port {port} ({e})")
+        return
     # Time out recv so the thread can notice shutdown instead of blocking forever.
     image_hub.zmq_socket.setsockopt(zmq.RCVTIMEO, 1000)
     print("[Thread] Video receiver started. Waiting for frames...")
@@ -169,7 +176,7 @@ def video_receiver():
         image_hub.close()
 
 
-def command_sender():
+def command_sender(host=PI_HOST, port=UDP_PORT_CMD):
     """Send the latest PWM commands to the Pi at a fixed rate."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     period = 1.0 / COMMAND_RATE_HZ
@@ -180,19 +187,19 @@ def command_sender():
     next_tick = time.monotonic()
     while state.running.is_set():
         if pi_ip is None:
-            pi_ip = resolve_host(PI_HOST)
+            pi_ip = resolve_host(host)
             if pi_ip is None:
                 if not warned:
-                    print(f"Sender: cannot resolve '{PI_HOST}', retrying...")
+                    print(f"Sender: cannot resolve '{host}', retrying...")
                     warned = True
                 time.sleep(1.0)
                 next_tick = time.monotonic()
                 continue
-            print(f"Sender: sending commands to {PI_HOST} ({pi_ip})")
+            print(f"Sender: sending commands to {host} ({pi_ip})")
 
         try:
             payload = json.dumps(build_command(state.get_pwms())).encode()
-            sock.sendto(payload, (pi_ip, UDP_PORT_CMD))
+            sock.sendto(payload, (pi_ip, port))
         except OSError as e:
             print(f"Sender error: {e}")
             pi_ip = None  # Re-resolve: the Pi may have a new address
@@ -210,20 +217,20 @@ def command_sender():
         neutral = json.dumps(build_command([PWM_NEUTRAL] * 8)).encode()
         for _ in range(3):
             try:
-                sock.sendto(neutral, (pi_ip, UDP_PORT_CMD))
+                sock.sendto(neutral, (pi_ip, port))
             except OSError:
                 break
             time.sleep(period)
     sock.close()
 
 
-def telemetry_listener():
+def telemetry_listener(port=UDP_PORT_DATA):
     """Receive telemetry from the Pi."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     try:
-        sock.bind(("0.0.0.0", UDP_PORT_DATA))
+        sock.bind(("0.0.0.0", port))
     except OSError as e:
         print(f"Binding error: {e}")
         return
@@ -243,7 +250,7 @@ def telemetry_listener():
                     "yaw": wrap_angle(float(raw["yaw"]) - YAW_OFFSET),
                 }
             )
-        except socket.timeout:
+        except TimeoutError:
             continue
         except (ValueError, KeyError, TypeError) as e:
             print(f"Listener: bad packet ({e})")
