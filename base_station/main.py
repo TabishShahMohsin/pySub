@@ -11,6 +11,7 @@ a lock and hands out copies so readers never see a half-updated sample.
 """
 
 import json
+import math
 import socket
 import threading
 import time
@@ -137,6 +138,24 @@ def build_command(pwms):
     }
 
 
+def parse_telemetry(raw):
+    """Validate a telemetry packet and apply the calibration offsets.
+
+    Raises ValueError / KeyError / TypeError for malformed packets. NaN and
+    infinity are rejected: a single NaN would poison the PID integral forever.
+    """
+    values = {key: float(raw[key]) for key in ("timestamp", "pressure", "roll", "pitch", "yaw")}
+    if not all(math.isfinite(v) for v in values.values()):
+        raise ValueError(f"non-finite value in {values}")
+    return {
+        "timestamp": values["timestamp"],
+        "pressure": values["pressure"] - PRESSURE_OFFSET,
+        "roll": values["roll"] - ROLL_OFFSET,
+        "pitch": values["pitch"] - PITCH_OFFSET,
+        "yaw": wrap_angle(values["yaw"] - YAW_OFFSET),
+    }
+
+
 def resolve_host(host):
     try:
         return socket.gethostbyname(host)
@@ -240,16 +259,7 @@ def telemetry_listener(port=UDP_PORT_DATA):
     while state.running.is_set():
         try:
             data, _ = sock.recvfrom(1024)
-            raw = json.loads(data.decode())
-            state.update_telemetry(
-                {
-                    "timestamp": float(raw["timestamp"]),
-                    "pressure": float(raw["pressure"]) - PRESSURE_OFFSET,
-                    "roll": float(raw["roll"]) - ROLL_OFFSET,
-                    "pitch": float(raw["pitch"]) - PITCH_OFFSET,
-                    "yaw": wrap_angle(float(raw["yaw"]) - YAW_OFFSET),
-                }
-            )
+            state.update_telemetry(parse_telemetry(json.loads(data.decode())))
         except TimeoutError:
             continue
         except (ValueError, KeyError, TypeError) as e:
@@ -359,7 +369,10 @@ def main():
 
             raw_depth = pressure_to_depth(telem["pressure"])
             if DEPTH_KF:
-                measured_depth = kf.predict(dt)
+                # Without measurements the constant-velocity model would drift
+                # without bound, so hold the estimate while the link is down.
+                if link_ok:
+                    measured_depth = kf.predict(dt)
                 if new_sample:
                     measured_depth = kf.correct(raw_depth)
             else:
@@ -376,9 +389,12 @@ def main():
                 target_yaw = wrap_angle(target_yaw + raw_yaw * ANGLE_SETPOINT_RATE * dt)
 
             if not link_ok:
-                # No feedback: don't let the PIDs act on stale data.
+                # No feedback: don't let the PIDs act on stale data. Also forget
+                # the last sample time, otherwise the first sample after the
+                # link returns would use the whole outage as dt.
                 for pid in pids:
                     pid.reset()
+                last_sample_time = None
             elif new_sample:
                 if DEPTH_PID:
                     depth_pid.compute(measured_depth, target_depth, sample_dt)

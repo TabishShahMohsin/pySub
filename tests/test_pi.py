@@ -4,7 +4,6 @@ FakeMaster records every RC override and flags any concurrent access, which
 would corrupt the real (non-thread-safe) MAVLink connection.
 """
 
-import contextlib
 import json
 import socket
 import threading
@@ -12,81 +11,7 @@ import time
 
 import pytest
 
-
-class Msg:
-    def __init__(self, kind, **fields):
-        self._kind = kind
-        self.__dict__.update(fields)
-
-    def get_type(self):
-        return self._kind
-
-
-class FakeMav:
-    def __init__(self, master):
-        self.master = master
-
-    def rc_channels_override_send(self, target_system, target_component, *pwms):
-        with self.master.guard():
-            self.master.rc.append(list(pwms))
-
-    def command_long_send(self, *args):
-        with self.master.guard():
-            self.master.commands.append(args)
-
-    def param_set_send(self, *args):
-        with self.master.guard():
-            pass
-
-    def request_data_stream_send(self, *args):
-        with self.master.guard():
-            pass
-
-
-class FakeMaster:
-    """Stands in for a pymavlink connection and detects concurrent use.
-
-    Like pymavlink's recv_match, filtering by type *discards* the non-matching
-    messages it reads.
-    """
-
-    target_system = 1
-    target_component = 1
-
-    def __init__(self, pending=()):
-        self._busy = threading.Lock()
-        self.concurrent_access = False
-        self.rc = []
-        self.commands = []
-        self.pending = list(pending)
-        self.mav = FakeMav(self)
-
-    @contextlib.contextmanager
-    def guard(self):
-        acquired = self._busy.acquire(blocking=False)
-        if not acquired:
-            self.concurrent_access = True
-        try:
-            time.sleep(0.0005)  # Widen any race window
-            yield
-        finally:
-            if acquired:
-                self._busy.release()
-
-    def recv_match(self, type=None, blocking=False):
-        with self.guard():
-            while self.pending:
-                msg = self.pending.pop(0)
-                if type is None or msg.get_type() in type:
-                    return msg
-            return None
-
-    def set_mode(self, mode):
-        with self.guard():
-            pass
-
-    def close(self):
-        pass
+from fakes import FakeMaster, Msg
 
 
 def make_pixhawk(pi_main, pending=()):

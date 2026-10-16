@@ -100,11 +100,16 @@ python -m pytest              # run the test suite
 ruff format . && ruff check . # format and lint by hand
 ```
 
-The test suite covers the PID, Kalman filter, thrust allocation (including golden values from the original implementation), controller input, and both programs' threads over real localhost sockets. A fake MAVLink connection checks that the Pixhawk is never accessed from two threads at once.
+The test suite is white-box: it has **100% line and branch coverage** of every Python file in the repo, and CI fails if that drops (`python -m pytest --cov`). It covers:
+
+- the PID, Kalman filter, thrust allocation (including golden values from the original implementation) and controller input;
+- both programs' threads over real localhost sockets, and both main loops end to end on a virtual clock (closed-loop control, telemetry loss and recovery, shutdown);
+- every hardware script against fakes of the Pixhawk, pigpio, serial IMU, Bar30, cameras and network, including the safety paths: Ctrl+C mid-spin must leave every thruster neutral and the vehicle disarmed;
+- thread safety: a fake MAVLink connection fails the test if the Pixhawk is ever accessed from two threads at once.
 
 ## CI/CD
 
-- **CI** (`.github/workflows/ci.yml`) runs on every push and pull request: ruff format check, ruff lint, shellcheck, and the test suite on Python 3.10 to 3.13.
+- **CI** (`.github/workflows/ci.yml`) runs on every push and pull request: ruff format check, ruff lint, shellcheck, and the test suite with 100% coverage enforced on Python 3.10 to 3.13.
 - **Release** (`.github/workflows/release.yml`): pushing a tag such as `v1.0.0` runs CI and publishes a GitHub release with separate base-station and Pi bundles.
 - **Deploy to the ROV:** `scripts/deploy_pi.sh [--install-deps] [--restart]` syncs the Pi code over SSH, installs dependencies into a virtualenv and installs the `rov-pi` systemd unit.
 - **Dependabot** keeps GitHub Actions and Python dependencies up to date.

@@ -17,6 +17,7 @@ import os
 os.environ["MAVLINK20"] = "1"
 
 import json  # noqa: E402
+import math  # noqa: E402
 import socket  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
@@ -183,6 +184,17 @@ class ThrusterState:
             return dict(self.pwms)
 
 
+def parse_pwm(value):
+    """Validate one PWM value from a command packet and clamp it to the ESC range.
+
+    Rejects bools, strings, NaN and infinity: int(float("inf")) would raise
+    OverflowError and kill the receiver thread, and int(True) would be 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"invalid PWM value {value!r}")
+    return max(PWM_MIN, min(PWM_MAX, int(value)))
+
+
 def _neutral_locked(pixhawk, thrusters):
     """Set every thruster to neutral and send it (thrusters.lock must be held)."""
     for key in thrusters.pwms:
@@ -236,11 +248,7 @@ def command_receiver(pixhawk, thrusters, port=UDP_PORT_CMD):
 
         try:
             new_cmds = json.loads(data.decode())
-            updates = {
-                key: max(PWM_MIN, min(PWM_MAX, int(val)))
-                for key, val in new_cmds.items()
-                if key in thrusters.pwms
-            }
+            updates = {key: parse_pwm(val) for key, val in new_cmds.items() if key in thrusters.pwms}
         except (ValueError, TypeError, AttributeError) as e:
             print(f"\n[Cmd] Bad packet: {e}")
             continue

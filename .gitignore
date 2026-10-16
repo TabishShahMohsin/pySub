@@ -75,3 +75,4 @@ videos/
 
 # Pi runtime config (see deploy/rov-pi.service)
 rov.env
+coverage.xml

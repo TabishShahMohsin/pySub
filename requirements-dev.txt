@@ -8,5 +8,6 @@ pyzmq
 pymavlink
 pytest>=8
 pytest-timeout
+pytest-cov
 ruff==0.16.8
 pre-commit
