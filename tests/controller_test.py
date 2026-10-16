@@ -1,5 +1,7 @@
-import pygame
 import os
+
+import pygame
+
 
 def main():
     pygame.init()
@@ -18,12 +20,12 @@ def main():
     try:
         while True:
             pygame.event.pump()
-            
+
             # Clear terminal screen for a clean live view
-            os.system('cls' if os.name == 'nt' else 'clear')
-            
+            os.system("cls" if os.name == "nt" else "clear")
+
             print(f"--- Controller: {joy.get_name()} ---")
-            
+
             # 1. Check ALL Axes (Sticks and Triggers)
             print("\nAXES (Sticks/Triggers):")
             for i in range(joy.get_numaxes()):
@@ -38,17 +40,18 @@ def main():
             for i in range(joy.get_numbuttons()):
                 state = joy.get_button(i)
                 btn_states.append(f"B{i}: {'ON ' if state else 'OFF'}")
-            
+
             # Print buttons in rows of 4 for readability
             for i in range(0, len(btn_states), 4):
-                print("  ".join(btn_states[i:i+4]))
+                print("  ".join(btn_states[i : i + 4]))
 
-            pygame.time.wait(100) # 10Hz update rate
+            pygame.time.wait(100)  # 10Hz update rate
 
     except KeyboardInterrupt:
         print("\nExiting...")
     finally:
         pygame.quit()
+
 
 if __name__ == "__main__":
     main()

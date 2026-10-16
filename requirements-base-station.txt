@@ -1,0 +1,6 @@
+# Base station (laptop / desktop)
+numpy
+pygame
+opencv-python
+imagezmq
+pyzmq

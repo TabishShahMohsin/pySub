@@ -1,0 +1,12 @@
+# ROV Raspberry Pi
+numpy
+opencv-python
+imagezmq
+pyzmq
+pymavlink
+pyrealsense2  # optional: the Pi program runs without it (USB camera only)
+# Test scripts only
+pyserial
+pigpio
+ms5837
+# picamera2 is installed with apt: sudo apt install python3-picamera2

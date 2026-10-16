@@ -8,7 +8,7 @@ PI_IP = "0.0.0.0"
 PI_PORT = 5006
 
 # BASE_IP = "10.222.231.148"   # <-- base station IP
-BASE_IP = socket.gethostbyname('mba.local')
+BASE_IP = socket.gethostbyname("mba.local")
 BASE_PORT = 5005
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

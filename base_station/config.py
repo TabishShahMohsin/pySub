@@ -1,73 +1,106 @@
+"""Base-station configuration: network, geometry, controller and tuning.
+
+Thruster layout (top view)::
+
+            ---------------------------width----------------------------
+        |    T1 (CW)                                         T2 (CW)
+        |
+        |           T5 (CCW)                          T6 (CW)
+        |                               x
+        |                               |
+      length                            o ----- y
+        |                                \\
+        |                                 z (into the page / downwards)
+        |
+        |           T7 (CW)                            T8 (CCW)
+        |
+        |   T3 (CCW)                                           T4 (CCW)
+
+Force exerted by a thruster is taken +ve when it points along +x for the
+lateral thrusters (T1-T4) and downwards (+z) for the vertical thrusters
+(T5-T8), irrespective of CW/CCW propeller.
+
+Units: lengths are in mm and thrust in the units of ``MAX_THRUST``. Torques
+are therefore in thrust*mm. Positions and limits use the same units, so the
+allocation is consistent.
+"""
+
 import math
-import socket
+import os
+
 import numpy as np
 
-'''
-        ---------------------------width----------------------------
-    |    T1 (CW)                                         T2 (CW)
-    |
-    |                      
-    |           T5 (CCW)                          T6 (CW)
-    |                               x
-    |                               |  
-  length                            o ----- y 
-    |                                \
-    |                                 z (inwards)
-    |
-    |           T7 (CW)                            T8 (CCW)
-    |
-    |
-    |   T3 (CCW)                                           T4 (CCW)
+# ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
+# Hostname (or IP) of the ROV's Raspberry Pi. Override with ROV_PI_HOST.
+# It is resolved lazily (with retries) by the command sender, so a missing
+# mDNS entry no longer crashes the program at import time.
+PI_HOST = os.environ.get("ROV_PI_HOST", "auv.local")
+UDP_PORT_DATA = 5005  # Pi -> base station telemetry
+UDP_PORT_CMD = 5006  # Base station -> Pi thruster commands
+VIDEO_PORT = 5555  # imagezmq video stream
 
-    Force exerted by a thruster is taken +ve in the sense of pointing to x-axis for the lateral thrusters, and downwards for the vertical thrusters
-    Irrespective of CW/CCW propeller
-    SI units are used: m, s
+COMMAND_RATE_HZ = 20  # Rate at which PWM commands are sent to the Pi
+CONTROL_RATE_HZ = 30  # Base-station main-loop rate
+TELEMETRY_TIMEOUT_S = 1.0  # Telemetry older than this is treated as lost
 
-'''
-
-# PI_IP = "192.168.137.2"
-PI_IP = socket.gethostbyname("auv.local")
-UDP_PORT_DATA = 5005
-UDP_PORT_CMD = 5006
-
+# ---------------------------------------------------------------------------
+# Geometry
+# ---------------------------------------------------------------------------
 ROV_WIDTH_MM = 262.629
 ROV_LENGTH_MM = 195.311
 
-# "V" Configuration: T1(45), T2(-45), T3(135), T4(-135)
-THRUSTER_ANGLES_DEG = [45, -45, 135, -135] # From +ve x-axis (Force exerted to the vehicle)
+# "V" configuration: T1(45), T2(-45), T3(135), T4(-135)
+# Angle from the +x axis of the force exerted on the vehicle.
+THRUSTER_ANGLES_DEG = [45, -45, 135, -135]
 
 SIN_45 = math.sin(math.radians(45))
 
-# MAX thrust offered by an individual thruster
-# This change was made due to problems in cancelling moments: from fixing PWM ranges to thrust ranges
-MAX_THRUST = 2.35 
+# Max thrust allowed from an individual thruster. Limits are expressed in
+# thrust (not PWM) so that moments cancel correctly.
+MAX_THRUST = 2.35
 
 PWM_NEUTRAL = 1500
 
+# ---------------------------------------------------------------------------
+# Input device
+# ---------------------------------------------------------------------------
 XBOX = "XBOX"
 PS = "PS"
-KEYBAORD = "KEYBOARD"
-CONTROLLER_TYPE = KEYBAORD
+KEYBOARD = "KEYBOARD"
+CONTROLLER_TYPE = KEYBOARD
 
-# Found mechanical team messing up the connections, as exchanging 2 would invert the direction of thrust
-# Also 4 propellers must in be in one sense and the other 4 in opp sense for cancelling counter rotor torque
+# ---------------------------------------------------------------------------
+# Thruster direction inversion
+# ---------------------------------------------------------------------------
+# Swapping two ESC phase wires inverts a thruster's direction. Four propellers
+# must spin one way and four the other to cancel the counter-rotor torque.
 I1 = False
 I2 = True
 I3 = True
-I4 = True 
+I4 = True
 I5 = True
 I6 = True
 I7 = False
 I8 = False
 
-def invert_pwm(PWM, invert=True):
-    if invert == True:
-        return PWM_NEUTRAL - (PWM - PWM_NEUTRAL)
-    return PWM
+INVERTED_THRUSTERS = [I1, I2, I3, I4, I5, I6, I7, I8]
 
 
-# Due to unreliable electronics some thrusters tend to fail, only 6 thrusters with 3 lateral and 3 vertical are reuqired to attain 6 DOFs
-# However cacelling the counter rotor torque with one less thruster is impossible and hence unaccounted in such a failure
+def invert_pwm(pwm, invert=True):
+    """Mirror a PWM value about neutral when ``invert`` is set."""
+    if invert:
+        return PWM_NEUTRAL - (pwm - PWM_NEUTRAL)
+    return pwm
+
+
+# ---------------------------------------------------------------------------
+# Working thrusters
+# ---------------------------------------------------------------------------
+# Six thrusters (3 lateral + 3 vertical) are enough for 6 DOF. Cancelling the
+# counter-rotor torque with one thruster missing is impossible, so that is not
+# compensated for when a thruster is disabled here.
 W1 = True
 W2 = True
 W3 = True
@@ -79,7 +112,8 @@ W8 = True
 
 WORKING_THRUSTERS = np.array([W1, W2, W3, W4, W5, W6, W7, W8])
 
-# Need to find these again for the working thrusters otherwise they will max out before the joystick reaches extrema
+# These assume all thrusters work. Recompute them for a reduced set, otherwise
+# the thrusters saturate before the joystick reaches its extremes.
 MAX_AXIAL_FORCE = 4 * SIN_45 * MAX_THRUST
 MAX_YAW_TORQUE = 2 * SIN_45 * (ROV_LENGTH_MM + ROV_WIDTH_MM) * MAX_THRUST
 MAX_HEAVE_FORCE = 4 * MAX_THRUST
@@ -90,35 +124,48 @@ MAX_PITCH_TORQUE = 4 * (ROV_LENGTH_MM / 2) * MAX_THRUST
 RECORD_SENSORS = False
 RECORD_FOOTAGE = False
 
-# Things to Calibrate:
-
+# ---------------------------------------------------------------------------
+# Calibration
+# ---------------------------------------------------------------------------
 DEPTH_KF = False
 
-PRESSURE_OFFSET = 988 - 1013.25 + 1020.91 - 1013.25 # mbar # Diff for location and whether
+SURFACE_PRESSURE_MBAR = 1013.25
+WATER_DENSITY = 1025  # kg/m^3 (use ~997 for fresh water)
+GRAVITY = 9.81  # m/s^2
+
+# Difference for location and weather (mbar)
+PRESSURE_OFFSET = 988 - 1013.25 + 1020.91 - 1013.25
 ROLL_OFFSET = 0
 PITCH_OFFSET = 0
-YAW_OFFSET = 50 # Make this in the direction of the gate
+YAW_OFFSET = 50  # Set this so that yaw = 0 points towards the gate
 
-# meter to -1 to 1
+# ---------------------------------------------------------------------------
+# PID gains
+# ---------------------------------------------------------------------------
+# Depth: metres -> command in [-1, 1]
 DEPTH_PID = False
 DEPTH_KP = 1.2
 DEPTH_KI = 0.0
 DEPTH_KD = 0.0
 
-# Angle in degrees to -1 to 1
+# Pitch: degrees -> command in [-1, 1]
 PITCH_PID = False
 PITCH_KP = 0.04
 PITCH_KI = 0.005
 PITCH_KD = 0.03
 
-# Angle in degrees to -1 to 1
+# Roll: degrees -> command in [-1, 1]
 ROLL_PID = False
 ROLL_KP = 0.04
 ROLL_KI = 0.005
 ROLL_KD = 0.03
 
-# Angle in degrees to -1 to 1
+# Yaw: degrees -> command in [-1, 1]
 YAW_PID = False
 YAW_KP = 0.0014
 YAW_KI = 0.000
 YAW_KD = 0.0
+
+# Setpoint slew rates while the stick is held (per second)
+DEPTH_SETPOINT_RATE = 0.5  # m/s
+ANGLE_SETPOINT_RATE = 20.0  # deg/s

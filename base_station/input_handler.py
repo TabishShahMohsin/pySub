@@ -1,167 +1,164 @@
-import pygame
+"""Input devices. Every controller returns a 6-element numpy array:
+
+[surge, sway, heave, roll, pitch, yaw], each in [-1, 1]
+"""
+
+import math
+
 import numpy as np
-from config import CONTROLLER_TYPE, XBOX, PS, KEYBAORD
+import pygame
+
+from config import CONTROLLER_TYPE, KEYBOARD, PS, XBOX
+
+
+def _clip_to_unit_circle(a, b):
+    """Scale (a, b) back onto the unit circle if a stick reports r > 1."""
+    r = math.hypot(a, b)
+    if r > 1:
+        return a / r, b / r
+    return a, b
+
+
+def _open_joystick(label):
+    pygame.joystick.init()
+    if pygame.joystick.get_count() == 0:
+        raise RuntimeError(f"Error: No {label} controller detected.")
+    joystick = pygame.joystick.Joystick(0)
+    joystick.init()
+    print(f"{label} Controller Connected: {joystick.get_name()}")
+    return joystick
 
 
 class XboxController:
-    """Handles connection and reading of an Xbox controller."""
-    def __init__(self, deadzone=0.1):
-        pygame.joystick.init()
-        if pygame.joystick.get_count() == 0:
-            raise RuntimeError("Error: No Xbox controller detected.")
+    """Reads an Xbox controller (pygame 2 / SDL2 axis layout)."""
 
-        self.joystick = pygame.joystick.Joystick(0)
-        self.joystick.init()
-        print(f"Xbox Controller Connected: {self.joystick.get_name()}")
+    def __init__(self, deadzone=0.1):
+        self.joystick = _open_joystick("Xbox")
         self.deadzone = deadzone
 
     def get_input_vector(self):
-        """Reads axes and returns (surge, sway, yaw)."""
-        surge_input = -self.joystick.get_axis(1)   # Left stick Y (invert)
-        sway_input = self.joystick.get_axis(0)     # Left stick X
-        heave_input = 0.0
-        if self.joystick.get_button(5): heave_input += 1.0  # RB
-        if self.joystick.get_button(4): heave_input -= 1.0  # LB
+        js = self.joystick
+        surge = -js.get_axis(1)  # Left stick Y (inverted)
+        sway = js.get_axis(0)  # Left stick X
 
-        yaw_input = (self.joystick.get_axis(5) - self.joystick.get_axis(2)) / 2  # Triggers
-        pitch_input = -self.joystick.get_axis(4) # Right stick Y (invert for nose up)
-        roll_input = self.joystick.get_axis(3)   # Right stick X
+        heave = 0.0
+        if js.get_button(5):  # RB
+            heave += 1.0
+        if js.get_button(4):  # LB
+            heave -= 1.0
 
-        # Found the r(=x2 + y2) for a joystick to be exceeding 1
-        if (np.pow(surge_input, 2) + np.pow(sway_input, 2)) > 1:
-            r = np.pow(np.pow(surge_input, 2) + np.pow(sway_input, 2), 1/2)
-            surge_input = surge_input / r
-            sway_input = sway_input / r
+        yaw = (js.get_axis(5) - js.get_axis(2)) / 2  # RT - LT
+        pitch = -js.get_axis(4)  # Right stick Y (inverted for nose up)
+        roll = js.get_axis(3)  # Right stick X
 
-        # Found the r(=x2 + y2) for a joystick to be exceeding 1
-        if (np.pow(pitch_input, 2) + np.pow(roll_input, 2)) > 1:
-            r = np.pow(np.pow(pitch_input, 2) + np.pow(roll_input, 2), 1/2)
-            pitch_input = pitch_input / r
-            roll_input = roll_input / r
+        surge, sway = _clip_to_unit_circle(surge, sway)
+        pitch, roll = _clip_to_unit_circle(pitch, roll)
 
-        inputs = np.array([
-            surge_input, sway_input, heave_input,
-            roll_input, pitch_input, yaw_input,
-        ])
-
-        # Apply deadzone
-        inputs[abs(inputs) < self.deadzone] = 0.0
-
+        inputs = np.array([surge, sway, heave, roll, pitch, yaw])
+        inputs[np.abs(inputs) < self.deadzone] = 0.0
         return inputs
 
 
 class PSController:
-    # Can't find the PS4 controller for now
-    """Handles connection and reading of a PS4/PS5 controller."""
-    def __init__(self, deadzone=0.1):
-        pygame.joystick.init()
-        if pygame.joystick.get_count() == 0:
-            raise RuntimeError("Error: No PS controller detected.")
+    """Reads a PS4/PS5 controller (pygame 2 / SDL2 axis layout).
 
-        self.joystick = pygame.joystick.Joystick(0)
-        self.joystick.init()
-        print(f"PS Controller Connected: {self.joystick.get_name()}")
+    Untested on hardware: run tests/controller_test.py to confirm the axis and
+    button indices for your controller before relying on it.
+    """
+
+    def __init__(self, deadzone=0.1):
+        self.joystick = _open_joystick("PS")
         self.deadzone = deadzone
 
     def get_input_vector(self):
-        """Reads axes and returns (surge, sway, yaw)."""
-        surge_input = -self.joystick.get_axis(1)   # Left stick Y
-        sway_input = self.joystick.get_axis(0)     # Left stick X
-        yaw_input = self.joystick.get_axis(2) - self.joystick.get_axis(5)  # Right stick X diff
+        js = self.joystick
+        surge = -js.get_axis(1)  # Left stick Y (inverted)
+        sway = js.get_axis(0)  # Left stick X
 
-        # Found the r(=x2 + y2) for a joystick to be exceeding 1
-        if (np.pow(surge_input, 2) + np.pow(sway_input, 2)) > 1:
-            r = np.pow(np.pow(surge_input, 2) + np.pow(sway_input, 2), 1/2)
-            surge_input = surge_input / r
-            sway_input = sway_input / r
+        heave = 0.0
+        if js.get_button(10):  # R1
+            heave += 1.0
+        if js.get_button(9):  # L1
+            heave -= 1.0
 
-        # Apply deadzone
-        surge_input = 0.0 if abs(surge_input) < self.deadzone else surge_input
-        sway_input = 0.0 if abs(sway_input) < self.deadzone else sway_input
-        yaw_input = 0.0 if abs(yaw_input) < self.deadzone else yaw_input
+        yaw = (js.get_axis(5) - js.get_axis(4)) / 2  # R2 - L2
+        pitch = -js.get_axis(3)  # Right stick Y (inverted for nose up)
+        roll = js.get_axis(2)  # Right stick X
 
-        return np.array([surge_input, sway_input, yaw_input])
+        surge, sway = _clip_to_unit_circle(surge, sway)
+        pitch, roll = _clip_to_unit_circle(pitch, roll)
+
+        inputs = np.array([surge, sway, heave, roll, pitch, yaw])
+        inputs[np.abs(inputs) < self.deadzone] = 0.0
+        return inputs
+
 
 class KeyboardController:
-    """Mimics a controller using WASD, Arrows, and Space/Shift for 6-DoF control."""
+    """Mimics a controller with the keyboard for 6-DOF control.
+
+    The pygame window must have focus for key presses to register.
+    """
+
     def __init__(self, deadzone=0.0):
         print("6-DoF Keyboard Control Mode Active:")
-        print(" - WASD: Surge/Sway")
+        print(" - W / S: Surge")
+        print(" - A / D: Sway")
         print(" - Q / E: Yaw")
-        print(" - Space / L-Shift: Heave (Up/Down)")
+        print(" - Space / L-Shift: Heave")
         print(" - I / K: Pitch")
         print(" - J / L: Roll")
-        
-        # State for smoothing (0.0 to 1.0)
+
+        # Smoothed state, each in [-1, 1]
         self.surge = 0.0
         self.sway = 0.0
         self.heave = 0.0
         self.roll = 0.0
         self.pitch = 0.0
         self.yaw = 0.0
-        
-        self.ramp_speed = 0.1  # Smoothing factor
+
+        self.ramp_speed = 0.1  # Change per call (called at the control rate)
+
+    @staticmethod
+    def _axis(keys, positive, negative):
+        return float(keys[positive]) - float(keys[negative])
 
     def get_input_vector(self):
-        """Processes keyboard state and returns (surge, sway, heave, roll, pitch, yaw)."""
         keys = pygame.key.get_pressed()
 
-        # --- Linear Motion ---
-        target_surge = 0.0
-        if keys[pygame.K_w]: target_surge += 1.0
-        if keys[pygame.K_s]: target_surge -= 1.0
+        target_surge = self._axis(keys, pygame.K_w, pygame.K_s)
+        target_sway = self._axis(keys, pygame.K_d, pygame.K_a)
+        target_heave = self._axis(keys, pygame.K_SPACE, pygame.K_LSHIFT)
+        target_yaw = self._axis(keys, pygame.K_q, pygame.K_e)
+        target_pitch = self._axis(keys, pygame.K_i, pygame.K_k)
+        target_roll = self._axis(keys, pygame.K_l, pygame.K_j)
 
-        target_sway = 0.0
-        if keys[pygame.K_d]: target_sway += 1.0
-        if keys[pygame.K_a]: target_sway -= 1.0
+        step = self.ramp_speed
+        self.surge = self._approach(self.surge, target_surge, step)
+        self.sway = self._approach(self.sway, target_sway, step)
+        self.heave = self._approach(self.heave, target_heave, step)
+        self.roll = self._approach(self.roll, target_roll, step)
+        self.pitch = self._approach(self.pitch, target_pitch, step)
+        self.yaw = self._approach(self.yaw, target_yaw, step)
 
-        target_heave = 0.0
-        if keys[pygame.K_SPACE]:  target_heave += 1.0
-        if keys[pygame.K_LSHIFT]: target_heave -= 1.0
+        return np.array([self.surge, self.sway, self.heave, self.roll, self.pitch, self.yaw])
 
-        # --- Rotational Motion ---
-        target_yaw = 0.0
-        if keys[pygame.K_e]: target_yaw -= 1.0
-        if keys[pygame.K_q]: target_yaw += 1.0
-
-        target_pitch = 0.0
-        if keys[pygame.K_i]: target_pitch += 1.0
-        if keys[pygame.K_k]: target_pitch -= 1.0
-
-        target_roll = 0.0
-        if keys[pygame.K_l]: target_roll += 1.0
-        if keys[pygame.K_j]: target_roll -= 1.0
-
-        # --- Apply Smoothing ---
-        self.surge = self._approach(self.surge, target_surge, self.ramp_speed)
-        self.sway = self._approach(self.sway, target_sway, self.ramp_speed)
-        self.heave = self._approach(self.heave, target_heave, self.ramp_speed)
-        self.roll = self._approach(self.roll, target_roll, self.ramp_speed)
-        self.pitch = self._approach(self.pitch, target_pitch, self.ramp_speed)
-        self.yaw = self._approach(self.yaw, target_yaw, self.ramp_speed)
-
-        return np.array([
-            self.surge, self.sway, self.heave, 
-            self.roll, self.pitch, self.yaw
-        ])
-
-    def _approach(self, current, target, step):
-        """Helper to move current value toward target by a small step."""
+    @staticmethod
+    def _approach(current, target, step):
+        """Move current towards target by at most step."""
         if current < target:
             return min(current + step, target)
-        elif current > target:
+        if current > target:
             return max(current - step, target)
         return current
 
-controller_type = CONTROLLER_TYPE.upper()
 
-if controller_type == XBOX:
-    JoystickController = XboxController
-elif controller_type == PS:
-    JoystickController = PSController
-elif controller_type == KEYBAORD:
-    JoystickController = KeyboardController
-else:
-    # Fallback: If no controller is found, don't crash, use Keyboard
-    print(f"Warning: '{CONTROLLER_TYPE}' not found. Falling back to Keyboard.")
+_CONTROLLERS = {
+    XBOX: XboxController,
+    PS: PSController,
+    KEYBOARD: KeyboardController,
+}
+
+JoystickController = _CONTROLLERS.get(CONTROLLER_TYPE.upper())
+if JoystickController is None:
+    print(f"Warning: Unknown controller '{CONTROLLER_TYPE}'. Falling back to keyboard.")
     JoystickController = KeyboardController

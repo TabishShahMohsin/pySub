@@ -1,62 +1,81 @@
-from pymavlink import mavutil
+"""Spin each physical Pixhawk output pin 1-8 individually (passthrough mode)."""
+
 import time
 
-master = mavutil.mavlink_connection('/dev/ttyACM0', baud=115200)
-master.wait_heartbeat()
-print("Connected!")
+from pymavlink import mavutil
 
-def set_parameter(name, value):
-    """Sets a parameter on the Pixhawk."""
+NEUTRAL = 1500
+TEST_PWM = 1600
+NEUTRAL_8 = [NEUTRAL] * 8
+
+
+def set_parameter(master, name, value):
+    """Set a parameter on the Pixhawk."""
     master.mav.param_set_send(
-        master.target_system, master.target_component,
-        name.encode('utf-8'), value, mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+        master.target_system,
+        master.target_component,
+        name.encode("utf-8"),
+        value,
+        mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
     )
 
-# 1. SET PINS TO PASSTHROUGH 
-# This tells Pin 1 to just follow Channel 1, Pin 2 to follow Channel 2, etc.
-# 51 = RCIN1, 52 = RCIN2, etc.
-print("Configuring pins for direct passthrough (no mixing)...")
-for i in range(1, 9):
-    param_name = f"SERVO{i}_FUNCTION"
-    set_parameter(param_name, 50 + i) # 51 through 58
-    time.sleep(0.1)
 
-# 2. ARM
-master.set_mode('MANUAL')
-master.mav.command_long_send(
-    master.target_system, master.target_component,
-    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0
-)
-print("Armed! Testing pins 1-8 individually...")
+def send_rc(master, pwms):
+    master.mav.rc_channels_override_send(master.target_system, master.target_component, *pwms)
 
-# 3. TEST LOOP
-try:
-    for i in range(1, 9):
-        print(f"Spinning physical Pin {i} ONLY")
-        pwms = [1500] * 8
-        pwms[i-1] = 1600 # Set only the target pin to 1600
-        
-        # Send for 2 seconds
-        t_end = time.time() + 2
-        while time.time() < t_end:
-            master.mav.rc_channels_override_send(
-                master.target_system, master.target_component,
-                *pwms, 0, 0, 0, 0, 0, 0, 0, 0
-            )
-            time.sleep(0.1)
-            
-        # Stop
-        master.mav.rc_channels_override_send(
-            master.target_system, master.target_component,
-            1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 0, 0, 0, 0, 0, 0, 0, 0
-        )
-        time.sleep(1)
 
-finally:
-    # Cleanup: It is recommended to set SERVOx_FUNCTION back to 
-    # Motor1...8 (values 33-40) if you want to use normal ROV modes later.
-    print("Disarming.")
+def arm_disarm(master, arm):
     master.mav.command_long_send(
-        master.target_system, master.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0
+        master.target_system,
+        master.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        0,
+        1 if arm else 0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     )
+
+
+def main():
+    master = mavutil.mavlink_connection("/dev/ttyACM0", baud=115200)
+    master.wait_heartbeat()
+    print("Connected!")
+
+    # 1. Passthrough: pin N follows RC channel N (51 = RCIN1 ... 58 = RCIN8)
+    print("Configuring pins for direct passthrough (no mixing)...")
+    for i in range(1, 9):
+        set_parameter(master, f"SERVO{i}_FUNCTION", 50 + i)
+        time.sleep(0.1)
+
+    # 2. Arm
+    master.set_mode("MANUAL")
+    arm_disarm(master, True)
+    print("Armed! Testing pins 1-8 individually...")
+
+    # 3. Test loop
+    try:
+        for i in range(1, 9):
+            print(f"Spinning physical pin {i} ONLY")
+            pwms = list(NEUTRAL_8)
+            pwms[i - 1] = TEST_PWM
+
+            t_end = time.monotonic() + 2
+            while time.monotonic() < t_end:
+                send_rc(master, pwms)
+                time.sleep(0.1)
+
+            send_rc(master, NEUTRAL_8)
+            time.sleep(1)
+    finally:
+        # Set SERVOx_FUNCTION back to Motor1..8 (33-40) to use normal ROV modes later.
+        send_rc(master, NEUTRAL_8)
+        print("Disarming.")
+        arm_disarm(master, False)
+
+
+if __name__ == "__main__":
+    main()

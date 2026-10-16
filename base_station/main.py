@@ -1,109 +1,292 @@
-import pygame
-import numpy as np
-import time
+"""Base-station control loop.
+
+Threads:
+  * main             - input, control (PID / KF), allocation, dashboard, video display
+  * command_sender   - sends thruster PWMs to the Pi at COMMAND_RATE_HZ
+  * telemetry_listener - receives IMU / pressure telemetry from the Pi
+  * video_receiver   - receives camera frames via imagezmq
+
+All data shared between threads goes through SharedState, which guards it with
+a lock and hands out copies so readers never see a half-updated sample.
+"""
+
 import json
 import socket
 import threading
-from config import *
-from input_handler import JoystickController
-from rov_kinematics import compute_thruster_forces, map_force_to_pwm
-from pid import PID
-from kf import DepthKalmanFilter
+import time
+
 import cv2
 import imagezmq
+import pygame
+import zmq
 
-shared_data = {
-    # Shared from base station to pi
-    "pwms": [1500] * 8,
-    "running": True,
-    # Shared from pi to base station
-    "timestamp": 0, # Heart beat
-    "pressure": 0, 
-    "roll": 0,
-    "pitch": 0,   
-    "yaw": 0,     
-    "last_frames": {}
-}
+from config import (
+    ANGLE_SETPOINT_RATE,
+    COMMAND_RATE_HZ,
+    CONTROL_RATE_HZ,
+    DEPTH_KD,
+    DEPTH_KF,
+    DEPTH_KI,
+    DEPTH_KP,
+    DEPTH_PID,
+    DEPTH_SETPOINT_RATE,
+    GRAVITY,
+    INVERTED_THRUSTERS,
+    PI_HOST,
+    PITCH_KD,
+    PITCH_KI,
+    PITCH_KP,
+    PITCH_OFFSET,
+    PITCH_PID,
+    PRESSURE_OFFSET,
+    PWM_NEUTRAL,
+    ROLL_KD,
+    ROLL_KI,
+    ROLL_KP,
+    ROLL_OFFSET,
+    ROLL_PID,
+    SURFACE_PRESSURE_MBAR,
+    TELEMETRY_TIMEOUT_S,
+    UDP_PORT_CMD,
+    UDP_PORT_DATA,
+    VIDEO_PORT,
+    WATER_DENSITY,
+    YAW_KD,
+    YAW_KI,
+    YAW_KP,
+    YAW_OFFSET,
+    YAW_PID,
+    invert_pwm,
+)
+from input_handler import JoystickController
+from kf import DepthKalmanFilter
+from pid import PID, wrap_angle
+from rov_kinematics import compute_thruster_forces, map_force_to_pwm
 
+DASHBOARD_RATE_HZ = 10
+
+
+class SharedState:
+    """Thread-safe container for data shared between the threads."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.running = threading.Event()
+        self.running.set()
+
+        # Base station -> Pi
+        self._pwms = [PWM_NEUTRAL] * 8
+
+        # Pi -> base station (offset-corrected)
+        self._telemetry = {
+            "timestamp": 0.0,  # Pi clock, heartbeat only
+            "pressure": SURFACE_PRESSURE_MBAR,
+            "roll": 0.0,
+            "pitch": 0.0,
+            "yaw": 0.0,
+        }
+        self._telemetry_seq = 0  # Increments on every packet received
+        self._telemetry_rx_time = None  # Local monotonic receive time
+
+        self._frames = {}
+
+    # --- PWMs -------------------------------------------------------------
+    def set_pwms(self, pwms):
+        with self._lock:
+            self._pwms = list(pwms)
+
+    def get_pwms(self):
+        with self._lock:
+            return list(self._pwms)
+
+    # --- Telemetry --------------------------------------------------------
+    def update_telemetry(self, telemetry):
+        with self._lock:
+            self._telemetry = telemetry
+            self._telemetry_seq += 1
+            self._telemetry_rx_time = time.monotonic()
+
+    def get_telemetry(self):
+        """Return (telemetry copy, sequence number, local receive time)."""
+        with self._lock:
+            return dict(self._telemetry), self._telemetry_seq, self._telemetry_rx_time
+
+    # --- Video ------------------------------------------------------------
+    def put_frame(self, cam_id, frame):
+        with self._lock:
+            self._frames[cam_id] = frame
+
+    def get_frames(self):
+        with self._lock:
+            return dict(self._frames)
+
+
+state = SharedState()
+
+
+def pressure_to_depth(pressure_mbar):
+    """Hydrostatic depth in metres from absolute pressure in mbar."""
+    return max(0.0, (pressure_mbar - SURFACE_PRESSURE_MBAR) * 100 / (WATER_DENSITY * GRAVITY))
+
+
+def build_command(pwms):
+    """Apply per-thruster inversion and build the JSON command for the Pi."""
+    return {f"t{i + 1}": invert_pwm(pwm, inv) for i, (pwm, inv) in enumerate(zip(pwms, INVERTED_THRUSTERS))}
+
+
+def resolve_host(host):
+    try:
+        return socket.gethostbyname(host)
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Threads
+# ---------------------------------------------------------------------------
 def video_receiver():
-    """Listens for video streams and displays them in separate windows."""
-    image_hub = imagezmq.ImageHub()
-    print("[Thread] Video Receiver started. Waiting for frames...")
-    
-    while shared_data["running"]:
-        try:
-            # recv_image returns the name of the stream (e.g., 'auv_realsense') 
-            # and the image itself
-            cam_id, frame = image_hub.recv_image()
-            
-            # Display based on which camera sent it
-            shared_data['last_frames'][cam_id] = frame
-            # cv2.imshow(cam_id, frame) # Can't do this in demon thread
-            # if cv2.waitKey(1) & 0xFF == ord('q'):
-            #     break
-                
-            # Acknowledge receipt to the sender (required by imagezmq)
-            image_hub.send_reply(b'OK')
-            
-        except Exception as e:
-            print(f"Video Receiver Error: {e}")
-            time.sleep(1)
+    """Receive camera frames from the Pi and store the latest one per camera."""
+    image_hub = imagezmq.ImageHub(open_port=f"tcp://*:{VIDEO_PORT}")
+    # Time out recv so the thread can notice shutdown instead of blocking forever.
+    image_hub.zmq_socket.setsockopt(zmq.RCVTIMEO, 1000)
+    print("[Thread] Video receiver started. Waiting for frames...")
 
-    cv2.destroyAllWindows()
+    try:
+        while state.running.is_set():
+            try:
+                cam_id, frame = image_hub.recv_image()
+            except zmq.Again:
+                continue
+            except Exception as e:
+                print(f"Video receiver error: {e}")
+                time.sleep(1)
+                continue
+
+            state.put_frame(cam_id, frame)
+            # REQ/REP: the sender blocks until it gets this reply.
+            image_hub.send_reply(b"OK")
+    finally:
+        image_hub.close()
+
 
 def command_sender():
-    """Sends PWM commands at a steady frequency."""
+    """Send the latest PWM commands to the Pi at a fixed rate."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    # Allows the port to be reused immediately after a crash
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    print("[Thread] Command Sender started.")
-    while shared_data["running"]:
+    period = 1.0 / COMMAND_RATE_HZ
+    pi_ip = None
+    warned = False
+
+    print("[Thread] Command sender started.")
+    next_tick = time.monotonic()
+    while state.running.is_set():
+        if pi_ip is None:
+            pi_ip = resolve_host(PI_HOST)
+            if pi_ip is None:
+                if not warned:
+                    print(f"Sender: cannot resolve '{PI_HOST}', retrying...")
+                    warned = True
+                time.sleep(1.0)
+                next_tick = time.monotonic()
+                continue
+            print(f"Sender: sending commands to {PI_HOST} ({pi_ip})")
+
         try:
-            pwms = shared_data["pwms"]
-            pwm_commands = {
-                "t1": invert_pwm(pwms[0], I1), "t2": invert_pwm(pwms[1], I2), 
-                "t3": invert_pwm(pwms[2], I3), "t4": invert_pwm(pwms[3], I4),
-                "t5": invert_pwm(pwms[4], I5), "t6": invert_pwm(pwms[5], I6),
-                "t7": invert_pwm(pwms[6], I7), "t8": invert_pwm(pwms[7], I8),
-            }
-            sock.sendto(json.dumps(pwm_commands).encode(), (PI_IP, UDP_PORT_CMD))
-            time.sleep(0.05)  # 20Hz
-        except Exception as e:
-            print(f"Sender Error: {e}")
-            time.sleep(1)
+            payload = json.dumps(build_command(state.get_pwms())).encode()
+            sock.sendto(payload, (pi_ip, UDP_PORT_CMD))
+        except OSError as e:
+            print(f"Sender error: {e}")
+            pi_ip = None  # Re-resolve: the Pi may have a new address
+
+        # Fixed-rate schedule (no drift); resync if we fell more than a tick behind.
+        next_tick += period
+        delay = next_tick - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        else:
+            next_tick = time.monotonic()
+
+    # Shutdown: make sure the last thing the Pi hears is neutral.
+    if pi_ip is not None:
+        neutral = json.dumps(build_command([PWM_NEUTRAL] * 8)).encode()
+        for _ in range(3):
+            try:
+                sock.sendto(neutral, (pi_ip, UDP_PORT_CMD))
+            except OSError:
+                break
+            time.sleep(period)
+    sock.close()
+
 
 def telemetry_listener():
-    """Listens for ROV feedback."""
+    """Receive telemetry from the Pi."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
+
     try:
         sock.bind(("0.0.0.0", UDP_PORT_DATA))
-        sock.settimeout(1.0) # Don't block forever if no data comes
     except OSError as e:
-        print(f"Binding Error: {e}")
+        print(f"Binding error: {e}")
         return
+    sock.settimeout(1.0)  # Don't block forever so shutdown is noticed
 
-    print("[Thread] Telemetry Listener started.")
-    while shared_data["running"]:
+    print("[Thread] Telemetry listener started.")
+    while state.running.is_set():
         try:
-            data, addr = sock.recvfrom(1024)
-            telemetry = json.loads(data.decode())
-            shared_data['timestamp'] = telemetry['timestamp']
-            shared_data['pressure'] = telemetry['pressure'] - PRESSURE_OFFSET
-            shared_data['roll'] = telemetry['roll'] - ROLL_OFFSET
-            shared_data['pitch'] = telemetry['pitch'] - PITCH_OFFSET
-            shared_data['yaw'] = telemetry['yaw'] - YAW_OFFSET
+            data, _ = sock.recvfrom(1024)
+            raw = json.loads(data.decode())
+            state.update_telemetry(
+                {
+                    "timestamp": float(raw["timestamp"]),
+                    "pressure": float(raw["pressure"]) - PRESSURE_OFFSET,
+                    "roll": float(raw["roll"]) - ROLL_OFFSET,
+                    "pitch": float(raw["pitch"]) - PITCH_OFFSET,
+                    "yaw": wrap_angle(float(raw["yaw"]) - YAW_OFFSET),
+                }
+            )
         except socket.timeout:
             continue
-        except Exception as e:
-            print(f"Listener Error: {e}")
+        except (ValueError, KeyError, TypeError) as e:
+            print(f"Listener: bad packet ({e})")
+        except OSError as e:
+            print(f"Listener error: {e}")
+            time.sleep(0.5)
+    sock.close()
+
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+def render_dashboard(fps, link_ok, telem, measured_depth, targets, forces, pwms):
+    target_depth, target_roll, target_pitch, target_yaw = targets
+    f, p = forces, pwms
+    link = "OK" if link_ok else "NO TELEMETRY"
+    sep = "-" * 60
+    return (
+        "\033[H"  # Cursor home; the screen is cleared once at start-up
+        "--- ROV_SEA-6.0 DASHBOARD ---\n"
+        f"SYSTEM: Pressure: {telem['pressure']:>7.2f} mbar | Link: {link:<12}\n"
+        f"{sep}\n"
+        "THRUSTERS (Forces & PWMs):\n"
+        f"  Horizontal: T1:{f[0]:>6.2f}({p[0]}) T2:{f[1]:>6.2f}({p[1]}) "
+        f"T3:{f[2]:>6.2f}({p[2]}) T4:{f[3]:>6.2f}({p[3]})\n"
+        f"  Vertical:   T5:{f[4]:>6.2f}({p[4]}) T6:{f[5]:>6.2f}({p[5]}) "
+        f"T7:{f[6]:>6.2f}({p[6]}) T8:{f[7]:>6.2f}({p[7]})\n"
+        f"{sep}\n"
+        f"NAVIGATION:      {'[SETPOINT]':>15} {'[MEASURED]':>15}\n"
+        f"  Depth (m):     {target_depth:>15.2f} {measured_depth:>15.2f}\n"
+        f"  Roll  (°):     {target_roll:>15.2f} {telem['roll']:>15.2f}\n"
+        f"  Pitch (°):     {target_pitch:>15.2f} {telem['pitch']:>15.2f}\n"
+        f"  Yaw   (°):     {target_yaw:>15.2f} {telem['yaw']:>15.2f}\n"
+        f"{sep}\n"
+        f"Status: RUNNING | Frequency: {fps:5.1f} FPS\n"
+    )
 
 
 def main():
     pygame.init()
-    screen = pygame.display.set_mode((400, 300))
+    # A window is needed for keyboard input focus.
+    pygame.display.set_mode((400, 300))
+    pygame.display.set_caption("ROV Base Station")
     clock = pygame.time.Clock()
 
     try:
@@ -115,118 +298,132 @@ def main():
 
     kf = DepthKalmanFilter()
 
-    target_depth = 0
     depth_pid = PID(DEPTH_KP, DEPTH_KI, DEPTH_KD, 1, -1)
-
-    target_roll = 0
     roll_pid = PID(ROLL_KP, ROLL_KI, ROLL_KD, 1, -1, is_angle=True)
-
-    target_pitch = 0
     pitch_pid = PID(PITCH_KP, PITCH_KI, PITCH_KD, 1, -1, is_angle=True)
-
-    target_yaw = 0
     yaw_pid = PID(YAW_KP, YAW_KI, YAW_KD, 1, -1, is_angle=True)
+    pids = (depth_pid, roll_pid, pitch_pid, yaw_pid)
 
-    thread1 = threading.Thread(target=telemetry_listener, daemon=True)
-    thread2 = threading.Thread(target=command_sender, daemon=True)
-    thread3 = threading.Thread(target=video_receiver, daemon=True)
+    target_depth = 0.0
+    target_roll = 0.0
+    target_pitch = 0.0
+    target_yaw = 0.0
 
-    thread1.start()
-    thread2.start()
-    thread3.start()
+    threads = [
+        threading.Thread(target=telemetry_listener, name="telemetry", daemon=True),
+        threading.Thread(target=command_sender, name="sender", daemon=True),
+        threading.Thread(target=video_receiver, name="video", daemon=True),
+    ]
+    for t in threads:
+        t.start()
 
-    running = True
-    while running:
-        dt = clock.tick(30)/1000
+    last_seq = 0
+    last_sample_time = None
+    measured_depth = 0.0
+    last_dashboard = 0.0
 
-        # Handle quit event
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
+    print("\033[2J", end="")  # Clear the terminal once
+
+    try:
+        running = True
+        while running:
+            dt = clock.tick(CONTROL_RATE_HZ) / 1000
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+
+            raw_surge, raw_sway, raw_heave, raw_roll, raw_pitch, raw_yaw = controller.get_input_vector()
+
+            telem, seq, rx_time = state.get_telemetry()
+            now = time.monotonic()
+            link_ok = rx_time is not None and now - rx_time < TELEMETRY_TIMEOUT_S
+
+            # Telemetry arrives at ~20 Hz while this loop runs at 30 Hz. Only
+            # feed the filter / PIDs when a *new* sample arrives, using the time
+            # between samples as dt; otherwise repeated samples would be counted
+            # as fresh measurements and the D-term would spike.
+            new_sample = seq != last_seq
+            sample_dt = 0.0
+            if new_sample:
+                sample_dt = rx_time - last_sample_time if last_sample_time is not None else dt
+                last_sample_time = rx_time
+                last_seq = seq
+
+            raw_depth = pressure_to_depth(telem["pressure"])
+            if DEPTH_KF:
+                measured_depth = kf.predict(dt)
+                if new_sample:
+                    measured_depth = kf.correct(raw_depth)
+            else:
+                measured_depth = raw_depth
+
+            # Setpoints follow the sticks.
+            if DEPTH_PID:
+                target_depth = max(0.0, target_depth + raw_heave * DEPTH_SETPOINT_RATE * dt)
+            if ROLL_PID:
+                target_roll = wrap_angle(target_roll + raw_roll * ANGLE_SETPOINT_RATE * dt)
+            if PITCH_PID:
+                target_pitch = wrap_angle(target_pitch + raw_pitch * ANGLE_SETPOINT_RATE * dt)
+            if YAW_PID:
+                target_yaw = wrap_angle(target_yaw + raw_yaw * ANGLE_SETPOINT_RATE * dt)
+
+            if not link_ok:
+                # No feedback: don't let the PIDs act on stale data.
+                for pid in pids:
+                    pid.reset()
+            elif new_sample:
+                if DEPTH_PID:
+                    depth_pid.compute(measured_depth, target_depth, sample_dt)
+                if ROLL_PID:
+                    roll_pid.compute(telem["roll"], target_roll, sample_dt)
+                if PITCH_PID:
+                    pitch_pid.compute(telem["pitch"], target_pitch, sample_dt)
+                if YAW_PID:
+                    yaw_pid.compute(telem["yaw"], target_yaw, sample_dt)
+
+            heave_cmd = depth_pid.output if DEPTH_PID else raw_heave
+            roll_cmd = roll_pid.output if ROLL_PID else raw_roll
+            pitch_cmd = pitch_pid.output if PITCH_PID else raw_pitch
+            yaw_cmd = yaw_pid.output if YAW_PID else raw_yaw
+
+            forces = compute_thruster_forces(raw_surge, raw_sway, heave_cmd, roll_cmd, pitch_cmd, yaw_cmd)
+            pwms = [map_force_to_pwm(f) for f in forces]
+            state.set_pwms(pwms)
+
+            if now - last_dashboard >= 1.0 / DASHBOARD_RATE_HZ:
+                last_dashboard = now
+                print(
+                    render_dashboard(
+                        clock.get_fps(),
+                        link_ok,
+                        telem,
+                        measured_depth,
+                        (target_depth, target_roll, target_pitch, target_yaw),
+                        forces,
+                        pwms,
+                    ),
+                    end="",
+                    flush=True,
+                )
+
+            for cam_id, frame in state.get_frames().items():
+                if frame is not None:
+                    cv2.imshow(cam_id, frame[::-1])  # Flip vertically
+
+            # waitKey is required for OpenCV windows to render.
+            if cv2.waitKey(1) & 0xFF == ord("q"):
                 running = False
+    finally:
+        # Stop thrusters safely: neutral first, then let the sender flush it.
+        state.set_pwms([PWM_NEUTRAL] * 8)
+        state.running.clear()
+        for t in threads:
+            t.join(timeout=1.5)
+        cv2.destroyAllWindows()
+        pygame.quit()
+        print("\nBase station exited.")
 
-        p_curr = shared_data["pressure"]
-        raw_depth = max(0, (p_curr - 1013.25) * 100 / (1025 * 9.81))
-
-        if DEPTH_KF:
-            measured_depth = kf.update(raw_depth, dt)
-        else:
-            measured_depth = raw_depth
-
-        # Read joystick input
-        raw_inputs = controller.get_input_vector()
-        raw_surge, raw_sway, raw_heave, raw_roll, raw_pitch, raw_yaw = raw_inputs
-
-        if DEPTH_PID:
-            target_depth += raw_heave * 0.5 * dt
-            heave_command = depth_pid.compute(measured_depth, target_depth, dt)
-        else:
-            heave_command = raw_heave
-
-        if PITCH_PID:
-            target_pitch += raw_pitch * 20 * dt
-            pitch_command = pitch_pid.compute(shared_data['pitch'], target_pitch, dt)
-        else:
-            pitch_command = raw_pitch
-
-        if ROLL_PID:
-            target_roll += raw_roll * 20 * dt
-            roll_command = roll_pid.compute(shared_data['roll'], target_roll, dt)
-        else:
-            roll_command = raw_roll
-
-        if YAW_PID:
-            target_yaw += raw_yaw * 20 * dt
-            yaw_command = yaw_pid.compute(shared_data['yaw'], target_yaw, dt)
-        else:
-            yaw_command = raw_yaw
-
-        # Get thruster force distribution
-        thruster_forces = compute_thruster_forces(raw_surge, raw_sway, heave_command, roll_command, pitch_command, yaw_command)
-
-        # Convert forces to PWM
-        thruster_pwms = [map_force_to_pwm(f) for f in thruster_forces]
-        shared_data['pwms'] = thruster_pwms
-
-        p = shared_data["pwms"]
-        f = thruster_forces
-        
-        dashboard = (
-            f"\033[H" +  # Move cursor to top-left (Home)
-            f"\n"*20 +
-            f"--- ROV_SEA-6.0 DASHBOARD ---\n"
-            f"SYSTEM: Pressure: {p_curr:>7.2f} mb"
-            f"{'-'*60}\n"
-            f"THRUSTERS (Forces & PWMs):\n"
-            f"  Horizontal: T1:{f[0]:>6.2f}({p[0]}) T2:{f[1]:>6.2f}({p[1]}) T3:{f[2]:>6.2f}({p[2]}) T4:{f[3]:>6.2f}({p[3]})\n"
-            f"  Vertical:   T5:{f[4]:>6.2f}({p[4]}) T6:{f[5]:>6.2f}({p[5]}) T7:{f[6]:>6.2f}({p[6]}) T8:{f[7]:>6.2f}({p[7]})\n"
-            f"{'-'*60}\n"
-            f"NAVIGATION:      {'[SETPOINT]':<15} {'[MEASURED]':<15}\n"
-            f"  Depth (m):     {target_depth:>15.2f} {measured_depth:>15.2f}\n"
-            f"  Roll  (°):     {target_roll:>15.2f} {shared_data['roll']:>15.2f}\n"
-            f"  Pitch (°):     {target_pitch:>15.2f} {shared_data['pitch']:>15.2f}\n"
-            f"  Yaw   (°):     {target_yaw:>15.2f} {shared_data['yaw']:>15.2f}\n"
-            f"{'-'*60}\n"
-            f"Status: RUNNING | Frequency: {clock.get_fps():.1f} FPS"
-        )
-
-        # Clear screen once at start or just use the Home cursor trick
-        print(dashboard, end='', flush=False)
-
-        cam_ids = list(shared_data['last_frames'].keys())
-        for cam_id in cam_ids:
-            frame = shared_data['last_frames'][cam_id]
-            frame = frame[::-1]
-            if frame is not None:
-                cv2.imshow(cam_id, frame)
-            
-        # waitKey(1) is required to actually render the window
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            running = False
-
-    # On exit: stop thrusters safely
-    pygame.quit()
-    shared_data["running"] = False
-    print("\nSimulation exited.")
 
 if __name__ == "__main__":
     main()

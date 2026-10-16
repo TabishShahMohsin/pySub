@@ -5,13 +5,13 @@ import time
 BASE_IP = "0.0.0.0"
 BASE_PORT = 5005
 
-'''
+"""
 Use socket.gethostbyname('auv.local') or auv.local in terminal
 Use ifconfig
 !!! TURN OFF WIFI FOR ENSURING CONNECTION OVER ETHERNET NOT SAME WIFI
-'''
+"""
 
-PI_IP = socket.gethostbyname('auv.local')  # <-- Pi IP
+PI_IP = socket.gethostbyname("auv.local")  # <-- Pi IP
 PI_PORT = 5006
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -32,11 +32,9 @@ while True:
         rtt = recv_time - send_time
 
         print(
-            f"BASE: sent {send_time:.6f} | "
-            f"pi replied {pi_time:.6f} | "
-            f"RTT = {rtt*1000:.2f} ms",
+            f"BASE: sent {send_time:.6f} | pi replied {pi_time:.6f} | RTT = {rtt * 1000:.2f} ms",
             end="\r",
-            flush=True
+            flush=True,
         )
 
         time.sleep(0.5)

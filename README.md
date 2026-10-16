@@ -15,11 +15,11 @@ This project contains the software to control an Underwater Remotely Operated Un
   - Receives and displays telemetry data and video from the ROV.
 
 - **ROV/Pi (`pi/`):**
-  - Runs on a Raspberry Pi mounted on the ROV.
-  - Receives control commands from the base station.
-  - Controls 8 thrusters via PWM signals using the `pigpio` library.
-  - Reads data from an IMU (for roll, pitch, yaw) and a pressure sensor (for depth).
-  - Streams video from a RealSense camera and a standard Pi camera back to the base station.
+  - Runs on a Raspberry Pi mounted on the ROV, connected to a Pixhawk running ArduSub over USB (`/dev/ttyACM0`).
+  - Receives control commands from the base station and forwards them to the 8 thrusters as MAVLink RC overrides (Pixhawk outputs in RC passthrough mode).
+  - Reads attitude (roll, pitch, yaw) and the external pressure sensor (Bar30, `SCALED_PRESSURE2`) from the Pixhawk.
+  - Streams video from a RealSense camera and a USB camera back to the base station.
+  - Watchdog: if no command arrives for 1 s, all thrusters are set to neutral.
 
 ## Core Logic
 
@@ -35,17 +35,31 @@ This project contains the software to control an Underwater Remotely Operated Un
 
 ## How to Run
 
-After installing the dependencies:
+Install the dependencies:
+
+```bash
+pip install -r requirements-base-station.txt   # on the laptop
+pip install -r requirements-pi.txt             # on the Pi
+```
+
 1.  **On the ROV's Raspberry Pi:**
-    - Ensure `pigpiod` service is running (`sudo pigpiod`).
     - Run the main Pi script: `python3 pi/main.py`.
 
 2.  **On the Base Station Computer:**
     - Run the main base station script: `python3 base_station/main.py`.
+    - Quit with the window close button or `q` in a video window; thrusters are sent neutral on exit.
 
 ## Configuration
 
-- **Network:** IP addresses / Hostnames for the Pi and base station are set in `pi/main.py` and `base_station/config.py`.
-- **Controller:** The input device (Keyboard, Xbox, PS) can be selected in `base_station/config.py`.
-- **Tuning:** PID gains, sensor offsets, and thruster inversion/enable flags are located in `base_station/config.py`.
-- **Hardware Pins:** GPIO pin assignments for the thrusters are defined in `pi/main.py`.
+- **Network:** The Pi's hostname defaults to `auv.local` and the base station's to `mba.local`. Override them with the `ROV_PI_HOST` (base station) and `ROV_BASE_HOST` (Pi) environment variables. Ports are in `base_station/config.py` and `pi/main.py`.
+- **Controller:** The input device (Keyboard, Xbox, PS) is selected in `base_station/config.py`. Use `tests/controller_test.py` to check axis/button indices.
+- **Tuning:** PID gains, sensor offsets, and thruster inversion/enable flags are in `base_station/config.py`.
+- **Hardware:** The logical-to-physical Pixhawk pin mapping (`THRUSTER_MAP`) is in `pi/main.py`.
+
+## Development
+
+Code is formatted and linted with [ruff](https://docs.astral.sh/ruff/) (settings in `pyproject.toml`):
+
+```bash
+ruff format . && ruff check .
+```

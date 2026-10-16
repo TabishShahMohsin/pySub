@@ -1,205 +1,180 @@
-'pip install pyserial'
-'this one is for linux/mac get the windows from: https://github.com/belovictor/handsfree_ros_imu/tree/master/demo/linux'
+"""Read the HFI-A9 serial IMU (Linux / macOS).
+
+Requires: pip install pyserial
+Windows demo: https://github.com/belovictor/handsfree_ros_imu/tree/master/demo/linux
+"""
+
+import math
+import struct
+import sys
 
 import serial
-import struct
-import platform
 import serial.tools.list_ports
-import math
+
+PORT = "/dev/ttyUSB0"
+BAUDRATE = 921600
+
+HEADER_1 = 0xAA
+HEADER_2 = 0x55
+IMU_PACKET_LEN = 0x2C  # Gyro, accel, magnetometer
+EULER_PACKET_LEN = 0x14  # Euler angles
 
 
-# Find ttyUSB* devices (IMU serial ports)
-def find_ttyUSB():
+def find_tty_usb():
+    """List the connected USB serial devices."""
     print(
-        "The default IMU serial port is /dev/ttyUSB0. "
-        "If multiple serial devices are detected, please modify the IMU port in the launch file."
+        f"The default IMU serial port is {PORT}. "
+        "If multiple serial devices are detected, change PORT in this script."
     )
-    ports = [port.device for port in serial.tools.list_ports.comports() if 'USB' in port.device]
-    print(
-        "Currently connected {} serial devices ({}): {}".format(
-            'USB', len(ports), ports
-        )
-    )
+    ports = [port.device for port in serial.tools.list_ports.comports() if "USB" in port.device]
+    print(f"Currently connected USB serial devices ({len(ports)}): {ports}")
 
 
-# CRC checksum verification (CRC-16)
-def checkSum(list_data, check_data):
-    data = bytearray(list_data)
+def check_sum(data, check_data):
+    """CRC-16 (Modbus) check of a packet."""
     crc = 0xFFFF
-    for byte in data:
+    for byte in bytearray(data):
         crc ^= byte
         for _ in range(8):
-            if (crc & 1) != 0:
-                crc >>= 1
-                crc ^= 0xA001
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xA001
             else:
                 crc >>= 1
-    return hex(((crc & 0xff) << 8) + (crc >> 8)) == hex(check_data[0] << 8 | check_data[1])
+    swapped = ((crc & 0xFF) << 8) | (crc >> 8)
+    return swapped == ((check_data[0] << 8) | check_data[1])
 
 
-# Convert hexadecimal byte data to IEEE 754 floating-point numbers
-def hex_to_ieee(raw_data):
-    ieee_data = []
-    raw_data.reverse()
-
-    for i in range(0, len(raw_data), 4):
-        hex_str = (
-            hex(raw_data[i]     | 0xff00)[4:6] +
-            hex(raw_data[i + 1] | 0xff00)[4:6] +
-            hex(raw_data[i + 2] | 0xff00)[4:6] +
-            hex(raw_data[i + 3] | 0xff00)[4:6]
-        )
-
-        if python_version == '2':
-            ieee_data.append(struct.unpack('>f', hex_str.decode('hex'))[0])
-        elif python_version == '3':
-            ieee_data.append(struct.unpack('>f', bytes.fromhex(hex_str))[0])
-
-    ieee_data.reverse()
-    return ieee_data
+def bytes_to_floats(raw):
+    """Decode little-endian IEEE 754 float32 values."""
+    return list(struct.unpack(f"<{len(raw) // 4}f", bytes(raw)))
 
 
-# Process incoming serial data byte-by-byte
-def handleSerialData(raw_data):
-    global buff, key, angle_degree, magnetometer, acceleration, angularVelocity, pub_flag
+class ImuParser:
+    """Byte-by-byte parser for the HFI-A9 serial protocol."""
 
-    # Store byte depending on Python version
-    if python_version == '2':
-        buff[key] = ord(raw_data)
-    else:
-        buff[key] = raw_data
+    def __init__(self):
+        self.buff = []
+        self.angular_velocity = [0.0, 0.0, 0.0]
+        self.acceleration = [0.0, 0.0, 0.0]
+        self.magnetometer = [0.0, 0.0, 0.0]
+        self.angle_degree = [0.0, 0.0, 0.0]
+        self.pending = [True, True]  # [IMU packet, Euler packet] still awaited
+        self.screen_cleared = False
 
-    key += 1
+    def feed(self, byte):
+        self.buff.append(byte)
 
-    # Check packet header
-    if buff[0] != 0xAA:
-        key = 0
-        return
+        if self.buff[0] != HEADER_1:
+            self.buff = []
+            return
+        if len(self.buff) < 3:
+            return
+        if self.buff[1] != HEADER_2:
+            self.buff = []
+            return
+        # Wait until the full packet is received
+        if len(self.buff) < self.buff[2] + 5:
+            return
 
-    if key < 3:
-        return
+        data = self.buff
+        self.buff = []
+        length = data[2]
 
-    if buff[1] != 0x55:
-        key = 0
-        return
+        if length == IMU_PACKET_LEN and self.pending[0]:
+            if check_sum(data[2:47], data[47:49]):
+                values = bytes_to_floats(data[7:47])
+                self.angular_velocity = values[1:4]
+                self.acceleration = values[4:7]
+                self.magnetometer = values[7:10]
+            else:
+                print("Checksum failed")
+            self.pending[0] = False
+        elif length == EULER_PACKET_LEN and self.pending[1]:
+            if check_sum(data[2:23], data[23:25]):
+                values = bytes_to_floats(data[7:23])
+                self.angle_degree = values[1:4]
+            else:
+                print("Checksum failed")
+            self.pending[1] = False
+        elif length not in (IMU_PACKET_LEN, EULER_PACKET_LEN):
+            print(f"No parser implemented for packet length: {length}, or invalid data")
+            return
 
-    # Wait until full packet length is received
-    if key < buff[2] + 5:
-        return
+        # Print once both packets have arrived
+        if any(self.pending):
+            return
+        self.pending = [True, True]
+        self.display()
 
-    # Full packet received
-    data_buff = list(buff.values())
+    def display(self):
+        acc = self.acceleration
+        acc_norm = math.sqrt(acc[0] ** 2 + acc[1] ** 2 + acc[2] ** 2) or 1.0
+        gyro = self.angular_velocity
+        ang = self.angle_degree
+        mag = self.magnetometer
 
-    # IMU data packet (gyro, accel, magnetometer)
-    if buff[2] == 0x2C and pub_flag[0]:
-        if checkSum(data_buff[2:47], data_buff[47:49]):
-            data = hex_to_ieee(data_buff[7:47])
-            angularVelocity = data[1:4]
-            acceleration = data[4:7]
-            magnetometer = data[7:10]
-        else:
-            print("Checksum failed")
-        pub_flag[0] = False
+        if not self.screen_cleared:
+            print("\033[2J", end="")  # Clear screen once
+            self.screen_cleared = True
+        print("\033[H", end="")
 
-    # Euler angle packet
-    elif buff[2] == 0x14 and pub_flag[1]:
-        if checkSum(data_buff[2:23], data_buff[23:25]):
-            data = hex_to_ieee(data_buff[7:23])
-            angle_degree = data[1:4]
-        else:
-            print("Checksum failed")
-        pub_flag[1] = False
-
-    else:
-        print("No parser implemented for packet length:", buff[2])
-        print("Or invalid data")
-        buff = {}
-        key = 0
-        return
-
-    buff = {}
-    key = 0
-
-    # Wait until both packets are received
-    if pub_flag[0] or pub_flag[1]:
-        return
-
-    pub_flag[0] = pub_flag[1] = True
-
-    # Normalize acceleration to gravity direction
-    acc_norm = math.sqrt(
-        acceleration[0] ** 2 +
-        acceleration[1] ** 2 +
-        acceleration[2] ** 2
-    )
-    
-    print("\033[2J", end="")   # Clear screen once
-    
-    print("\033[H", end="")
-    
-    c = (f"""
+        print(
+            f"""
 Acceleration (m/s²):
-    x-axis: {acceleration[0] * -9.8 / acc_norm:.2f}
-    y-axis: {acceleration[1] * -9.8 / acc_norm:.2f}
-    z-axis: {acceleration[2] * -9.8 / acc_norm:.2f}
+    x-axis: {acc[0] * -9.8 / acc_norm:.2f}
+    y-axis: {acc[1] * -9.8 / acc_norm:.2f}
+    z-axis: {acc[2] * -9.8 / acc_norm:.2f}
 
 Angular Velocity (rad/s):
-    x-axis: {angularVelocity[0]:.2f}
-    y-axis: {angularVelocity[1]:.2f}
-    z-axis: {angularVelocity[2]:.2f}
+    x-axis: {gyro[0]:.2f}
+    y-axis: {gyro[1]:.2f}
+    z-axis: {gyro[2]:.2f}
 
 Euler Angles (degrees):
-    roll : {angle_degree[0]:.2f}
-    pitch: {angle_degree[1]:.2f}
-    yaw  : {angle_degree[2]:.2f}
+    roll : {ang[0]:.2f}
+    pitch: {ang[1]:.2f}
+    yaw  : {ang[2]:.2f}
 
 Magnetic Field:
-    x-axis: {magnetometer[0]:.2f}
-    y-axis: {magnetometer[1]:.2f}
-    z-axis: {magnetometer[2]:.2f}
-""")
-    print(c, end = '\r', flush=True)
+    x-axis: {mag[0]:.2f}
+    y-axis: {mag[1]:.2f}
+    z-axis: {mag[2]:.2f}
+""",
+            end="",
+            flush=True,
+        )
 
 
-# Global variables
-key = 0
-buff = {}
-angularVelocity = [0, 0, 0]
-acceleration = [0, 0, 0]
-magnetometer = [0, 0, 0]
-angle_degree = [0, 0, 0]
-pub_flag = [True, True]
+def main():
+    find_tty_usb()
+
+    try:
+        hf_imu = serial.Serial(port=PORT, baudrate=BAUDRATE, timeout=0.5)
+        if not hf_imu.is_open:
+            hf_imu.open()
+        print("Serial port opened successfully...")
+    except serial.SerialException as e:
+        print(e)
+        print("Failed to open serial port")
+        sys.exit(1)
+
+    parser = ImuParser()
+    try:
+        while True:
+            # read() blocks for up to `timeout` waiting for at least one byte,
+            # so this loop doesn't busy-spin when no data is available.
+            data = hf_imu.read(max(1, hf_imu.in_waiting))
+            for byte in data:
+                parser.feed(byte)
+    except serial.SerialException as e:
+        print(f"Exception: {e}")
+        print("IMU disconnected or communication error")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nExiting.")
+    finally:
+        hf_imu.close()
 
 
 if __name__ == "__main__":
-    python_version = platform.python_version()[0]
-
-    find_ttyUSB()
-
-    port = "/dev/ttyUSB0"
-    baudrate = 921600
-
-    try:
-        hf_imu = serial.Serial(port=port, baudrate=baudrate, timeout=0.5)
-        if hf_imu.isOpen():
-            print("Serial port opened successfully...")
-        else:
-            hf_imu.open()
-            print("Serial port opened successfully...")
-    except Exception as e:
-        print(e)
-        print("Failed to open serial port")
-        exit(0)
-
-    while True:
-        try:
-            byte_count = hf_imu.inWaiting()
-        except Exception as e:
-            print("Exception:", e)
-            print("IMU disconnected or communication error")
-            exit(0)
-
-        if byte_count > 0:
-            data = hf_imu.read(byte_count)
-            for byte in data:
-                handleSerialData(byte)
+    main()

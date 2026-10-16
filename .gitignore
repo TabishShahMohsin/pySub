@@ -71,4 +71,4 @@ bags/
 data/
 
 videos/
-.mov
+*.mov
