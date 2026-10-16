@@ -9,5 +9,5 @@ pymavlink
 pytest>=8
 pytest-timeout
 pytest-cov
-ruff==0.16.8
+ruff==0.17.0
 pre-commit
